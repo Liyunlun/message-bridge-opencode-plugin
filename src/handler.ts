@@ -11,18 +11,18 @@ interface SessionContext {
 
 interface MessageBuffer {
   feishuMsgId: string | null;
-  // 🔥 改动 1: 分离思考过程和正文，分别存储
-  reasoningContent: string;
-  textContent: string;
+  reasoning: string; // 专门存思考
+  text: string; // 专门存正文
   lastUpdateTime: number;
 }
 
 // --- 全局状态 ---
 const sessionToFeishuMap = new Map<string, SessionContext>();
-const messageBuffers = new Map<string, MessageBuffer>();
-const messageRoleMap = new Map<string, string>(); // 角色缓存
+// ⚠️ 改动 1: Key 改为 SessionID。我们确保每个 Session 同一时间只维护一条活动的飞书消息，这样能避免 reasoning 和 text 也是 ID 不同导致的分裂
+const sessionBufferMap = new Map<string, MessageBuffer>();
+const messageRoleMap = new Map<string, string>();
 
-const UPDATE_INTERVAL = 800; // 节流间隔
+const UPDATE_INTERVAL = 500; // 稍微调快一点，飞书每秒2-5次问题不大
 let isListenerStarted = false;
 let shouldStopListener = false;
 
@@ -43,12 +43,9 @@ export async function startGlobalEventListener(api: OpenCodeApi, feishu: FeishuC
       retryCount = 0;
 
       for await (const event of events.stream) {
-        if (shouldStopListener) {
-          console.log('[Listener] 🛑 Loop terminated.');
-          break;
-        }
+        if (shouldStopListener) break;
 
-        // 1. 监听消息元数据，记录角色
+        // 1. 记录消息角色 (防止回声)
         if (event.type === 'message.updated') {
           const info = event.properties.info;
           if (info && info.id && info.role) {
@@ -57,7 +54,7 @@ export async function startGlobalEventListener(api: OpenCodeApi, feishu: FeishuC
           continue;
         }
 
-        // 2. 监听内容流
+        // 2. 监听内容流 (增量更新)
         if (event.type === 'message.part.updated') {
           const sessionId = event.properties.part.sessionID;
           const part = event.properties.part;
@@ -65,30 +62,29 @@ export async function startGlobalEventListener(api: OpenCodeApi, feishu: FeishuC
 
           if (!sessionId || !part) continue;
 
-          // 过滤掉用户自己的消息
-          const msgId = part.messageID;
-          const role = messageRoleMap.get(msgId);
+          // 过滤掉用户消息
+          const role = messageRoleMap.get(part.messageID);
           if (role === 'user') continue;
 
-          // 路由检查
           const context = sessionToFeishuMap.get(sessionId);
           if (!context) continue;
 
-          // 🔥 改动 2: 日志中打出 SessionID，方便追踪
-          // (为了不刷屏，这里只在有工具调用时打 Log，或者你可以选择性开启)
-
+          // 处理核心文本/思考
           if (part.type === 'text' || part.type === 'reasoning') {
-            await handleStreamUpdate(feishu, context.chatId, msgId, part, delta, sessionId);
-          } else if (part.type === 'tool') {
-            if (part.state?.status === 'running') {
-              console.log(`[Listener] [Session: ${sessionId}] 🔧 Tool Running: ${part.tool}`);
-            }
+            await handleStreamUpdate(feishu, context.chatId, sessionId, part, delta, false);
+          }
+
+          // 🔥 改动 2: 监听 step-finish，这是“防截断”的关键！
+          // 当一个步骤结束时，强制刷新缓冲区，确保最后几个字发出去
+          else if (part.type === 'step-finish') {
+            console.log(`[Listener] [Session: ${sessionId}] Step Finished. Force flushing.`);
+            await handleStreamUpdate(feishu, context.chatId, sessionId, part, undefined, true);
           }
         } else if (event.type === 'session.deleted' || event.type === 'session.error') {
           const sid = (event.properties as any).sessionID;
           if (sid) {
-            console.log(`[Listener] [Session: ${sid}] Session ended/error.`);
             sessionToFeishuMap.delete(sid);
+            sessionBufferMap.delete(sid);
           }
         }
       }
@@ -108,7 +104,7 @@ export function stopGlobalEventListener() {
   shouldStopListener = true;
   isListenerStarted = false;
   sessionToFeishuMap.clear();
-  messageBuffers.clear();
+  sessionBufferMap.clear();
   messageRoleMap.clear();
 }
 
@@ -116,81 +112,83 @@ export function stopGlobalEventListener() {
 async function handleStreamUpdate(
   feishu: FeishuClient,
   chatId: string,
-  msgId: string,
+  sessionId: string,
   part: Part,
-  delta?: string,
-  sessionId?: string // 用于日志
+  delta: string | undefined,
+  forceFlush: boolean
 ) {
-  if (!msgId) return;
-  // 类型守卫
-  if (part.type !== 'text' && part.type !== 'reasoning') return;
-
-  // 初始化 Buffer
-  let buffer = messageBuffers.get(msgId);
+  // 获取 Buffer
+  let buffer = sessionBufferMap.get(sessionId);
   if (!buffer) {
     buffer = {
       feishuMsgId: null,
-      reasoningContent: '', // 独立存储思考
-      textContent: '', // 独立存储正文
+      reasoning: '',
+      text: '',
       lastUpdateTime: 0,
     };
-    messageBuffers.set(msgId, buffer);
+    sessionBufferMap.set(sessionId, buffer);
   }
 
-  // 🔥 改动 3: 分别追加内容 🔥
-  // 无论是增量(delta)还是全量(text)，都归类存入对应的字段
-  const contentToAdd = typeof delta === 'string' && delta.length > 0 ? delta : part.text || '';
-
-  // 注意：如果 delta 存在，我们追加；如果不存在且 part.text 存在，这通常是 snapshot
-  // 这里简化逻辑：如果是 delta 模式，追加；如果是 snapshot 模式(delta为空)，则覆盖(或追加，视SDK行为而定)
-  // 为了稳妥，我们假设 delta 优先。
-
-  if (typeof delta === 'string') {
+  // 🔥 修复点: 安全的类型判断 🔥
+  if (typeof delta === 'string' && delta.length > 0) {
+    // 1. Delta 模式 (增量)
+    // 此时不需要访问 part.text，只用 delta
     if (part.type === 'reasoning') {
-      buffer.reasoningContent += delta;
-    } else {
-      buffer.textContent += delta;
+      buffer.reasoning += delta;
+    } else if (part.type === 'text') {
+      buffer.text += delta;
     }
-  } else if (typeof part.text === 'string') {
-    // 兜底：如果没有 delta，尝试用全量覆盖（防重复需小心，这里假设主要是 delta 流）
-    if (part.type === 'reasoning') {
-      if (part.text.length > buffer.reasoningContent.length) buffer.reasoningContent = part.text;
-    } else {
-      if (part.text.length > buffer.textContent.length) buffer.textContent = part.text;
+  } else if (!delta) {
+    // 2. Snapshot 模式 (快照/兜底)
+    // ❌ 之前的错误写法: typeof part.text === 'string' (TS 报错，因为 step-finish 没有 text)
+    // ✅ 现在的正确写法: 先判断 type，TS 就会知道它肯定有 text
+    if (part.type === 'text' || part.type === 'reasoning') {
+      if (part.type === 'reasoning') {
+        if (part.text.length > buffer.reasoning.length) buffer.reasoning = part.text;
+      } else {
+        // 这里 TS 知道 part 是 TextPart，一定有 text
+        if (part.text.length > buffer.text.length) buffer.text = part.text;
+      }
     }
   }
 
-  // 节流
+  // 节流判断 (Throttling)
   const now = Date.now();
-  const shouldUpdate = !buffer.feishuMsgId || now - buffer.lastUpdateTime > UPDATE_INTERVAL;
+  const timeSinceLastUpdate = now - buffer.lastUpdateTime;
+
+  const shouldUpdate = forceFlush || !buffer.feishuMsgId || timeSinceLastUpdate > UPDATE_INTERVAL;
 
   if (shouldUpdate) {
+    const hasContent = buffer.reasoning.length > 0 || buffer.text.length > 0;
+    if (!hasContent) return;
+
     buffer.lastUpdateTime = now;
 
-    // 🔥 改动 4: 拼接显示内容 (Markdown 格式) 🔥
+    // 拼接 Markdown 内容
     let displayContent = '';
 
-    // 如果有思考过程，用引用块包裹
-    if (buffer.reasoningContent.trim()) {
-      displayContent += `> 🧠 **思考过程**\n> ${buffer.reasoningContent.replace(
-        /\n/g,
-        '\n> '
-      )}\n\n`;
+    // A. 思考部分
+    if (buffer.reasoning) {
+      const cleanReasoning = buffer.reasoning.trimEnd();
+      const quoted = cleanReasoning
+        .split('\n')
+        .map(line => `> ${line}`)
+        .join('\n');
+      displayContent += `> 🤔 **Thinking...**\n${quoted}\n\n`;
     }
 
-    // 拼接正文
-    displayContent += buffer.textContent;
+    // B. 正文部分
+    if (buffer.text) {
+      displayContent += buffer.text;
+    }
 
-    // 如果两个都为空，不发送
     if (!displayContent.trim()) return;
 
     try {
       if (!buffer.feishuMsgId) {
-        console.log(`[Listener] [Session: ${sessionId}] Sending new msg...`);
         const sentId = await feishu.sendMessage(chatId, displayContent);
         if (sentId) buffer.feishuMsgId = sentId;
       } else {
-        // console.log(`[Listener] [Session: ${sessionId}] Updating msg...`);
         await feishu.editMessage(chatId, buffer.feishuMsgId, displayContent);
       }
     } catch (e) {
@@ -223,16 +221,11 @@ export const createMessageHandler = (api: OpenCodeApi, feishu: FeishuClient) => 
         const uniqueTitle = `Chat ${chatId.slice(-4)} [${new Date().toLocaleTimeString()}]`;
         const res = await api.createSession({ body: { title: uniqueTitle } });
         sessionId = res.data?.id;
-        if (sessionId) {
-          sessionCache.set(chatId, sessionId);
-          // 🔥 改动 5: 创建 Session 时打印日志
-          console.log(`[Bridge] ✨ Created New Session: ${sessionId}`);
-        }
+        if (sessionId) sessionCache.set(chatId, sessionId);
       }
 
       if (!sessionId) throw new Error('Failed to init Session');
 
-      // 注册路由
       sessionToFeishuMap.set(sessionId, { chatId, senderId });
 
       await api.promptSession({
@@ -240,7 +233,6 @@ export const createMessageHandler = (api: OpenCodeApi, feishu: FeishuClient) => 
         body: { parts: [{ type: 'text', text: text }] },
       });
 
-      // 🔥 改动 6: 发送 Prompt 后打印 SessionID
       console.log(`[Bridge] [Session: ${sessionId}] 🚀 Prompt Sent.`);
     } catch (error: any) {
       console.error('[Bridge] ❌ Error:', error);
