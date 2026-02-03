@@ -10,9 +10,6 @@ function trimSafe(s: string) {
   return (s || '').trim();
 }
 
-/**
- * 构造 Lark Markdown 组件
- */
 function larkMd(content: string) {
   return {
     tag: 'div',
@@ -20,10 +17,6 @@ function larkMd(content: string) {
   };
 }
 
-/**
- * 构造折叠面板
- * background_style: 'grey' 用于区分辅助信息（Thinking/Tools）
- */
 function collapsiblePanel(title: string, content: string, expanded = false) {
   const c = trimSafe(content);
   if (!c) return null;
@@ -31,7 +24,7 @@ function collapsiblePanel(title: string, content: string, expanded = false) {
   return {
     tag: 'collapsible_panel',
     expanded: expanded,
-    background_style: 'grey', // 灰色背景，表示这是“后台过程”
+    background_style: 'grey',
     header: {
       title: { tag: 'plain_text', content: title },
     },
@@ -43,24 +36,17 @@ function collapsiblePanel(title: string, content: string, expanded = false) {
   };
 }
 
-/**
- * 构造 Status 区域的小字
- */
 function getStatusWithEmoji(statusText: string): string {
   const s = statusText.toLowerCase();
   const isDone =
     s.includes('done') || s.includes('stop') || s.includes('finish') || s.includes('idle');
 
-  // 状态图标：完成用 ✅，进行中用 ⚡️
   const emoji = isDone ? '✅' : '⚡️';
 
   const cleanText = statusText.replace(/\n/g, ' | ').slice(0, 100);
   return `${emoji} ${cleanText}`;
 }
 
-/**
- * 解析 Markdown 分段
- */
 function parseSections(md: string) {
   const sectionMap: Record<string, string> = {
     thinking: '',
@@ -71,7 +57,6 @@ function parseSections(md: string) {
 
   let cleanMd = md;
 
-  // 1. 预处理 Thinking (> ...)
   const thinkingBlockRegex = /^(\s*> [^]*?)(?=\n[^>]|$)/;
   const thinkingMatch = md.match(thinkingBlockRegex);
 
@@ -80,7 +65,6 @@ function parseSections(md: string) {
     cleanMd = md.slice(thinkingMatch[0].length);
   }
 
-  // 2. 正则拆分 Sections
   const headerRegex = /(?:^|\n)(##+|(?:\*\*))\s*(.*?)(?:(?:\*\*|:)?)(?=\n|$)/g;
   let match;
 
@@ -131,44 +115,33 @@ export function renderFeishuCardFromHandlerMarkdown(handlerMarkdown: string): st
 
   const elements: any[] = [];
 
-  // --- 1. Header Title 逻辑 ---
   let headerTitle = '🤖 AI Assistant';
-  let headerColor = 'blue'; // 默认蓝色
+  let headerColor = 'blue';
 
   if (trimSafe(answer)) {
     headerTitle = '📝 Answer';
     headerColor = 'blue';
   } else if (trimSafe(tools)) {
-    headerTitle = '🧰 Tools / Steps'; // 工具执行中
-    headerColor = 'wathet'; // 浅蓝色
+    headerTitle = '🧰 Tools / Steps';
+    headerColor = 'wathet';
   } else if (trimSafe(thinking)) {
-    headerTitle = '🤔 Thinking Process'; // 思考中
-    headerColor = 'turquoise'; // 青色
+    headerTitle = '🤔 Thinking Process';
+    headerColor = 'turquoise';
   }
 
-  // --- 2. Body: 过程区 (灰色折叠块) ---
-
-  // Thinking -> 改为 "💭 Thinking"
   if (thinking.trim()) {
     elements.push(collapsiblePanel('💭 Thinking', thinking, false));
   }
 
-  // Tools -> 改为 "⚙️ Execution" (避免和标题 Tools 重复)
   if (tools.trim()) {
-    // 加一点间距
     if (elements.length > 0) elements.push({ tag: 'div', text: { tag: 'lark_md', content: ' ' } });
     elements.push(collapsiblePanel('⚙️ Execution', tools, false));
   }
 
-  // --- 3. Body: 正文区 (白色展开区) ---
   const finalAnswer = trimSafe(answer);
   if (finalAnswer) {
-    // 分割线：将灰色过程区和白色正文区隔开
     if (elements.length > 0) elements.push({ tag: 'hr' });
 
-    // 💡 尝试视觉优化：直接渲染 Markdown
-    // 注意：飞书标准卡片无法通过参数调整正文字号。
-    // 它是自适应的。我们确保它在独立的 div 中，周围留白，视觉上会显得“舒展”一些。
     elements.push({
       tag: 'div',
       text: {
@@ -183,7 +156,6 @@ export function renderFeishuCardFromHandlerMarkdown(handlerMarkdown: string): st
     });
   }
 
-  // --- 4. Footer: Status (小字) ---
   if (status.trim()) {
     elements.push({ tag: 'hr' });
 

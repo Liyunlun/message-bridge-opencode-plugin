@@ -1,6 +1,12 @@
 // src/bridge/buffer.ts
 import type { Part, ToolPart, ToolState } from '@opencode-ai/sdk';
-import { UPDATE_INTERVAL } from '../constants';
+import {
+  SAFE_MAX_REASONING,
+  SAFE_MAX_TEXT,
+  SAFE_MAX_TOOL_INPUT,
+  SAFE_MAX_TOOL_OUTPUT,
+  UPDATE_INTERVAL,
+} from '../constants';
 
 export type BufferStatus = 'streaming' | 'done' | 'aborted' | 'error';
 
@@ -29,21 +35,12 @@ export interface MessageBuffer {
   statusNote?: string;
 }
 
-// --- helpers (非 UI，仅安全/通用) ---
-export function sleep(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 export function simpleHash(s: string): string {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return String(h);
 }
 
-/**
- * 安全截断（避免极端情况下平台 edit/patch 失败或内存爆）
- * 真实的“折叠/展示裁剪”请交给 renderer
- */
 export function clipTail(s: string, max: number): string {
   if (!s) return '';
   if (s.length <= max) return s;
@@ -59,16 +56,9 @@ function safeJsonStringify(x: unknown, maxChars: number): string {
   }
 }
 
-// 这些只是安全上限（不是 UI）
-// 你也可以后续把这些上限挪到 renderer；这里先保留保底
-const SAFE_MAX_REASONING = 8000;
-const SAFE_MAX_TEXT = 24000;
-const SAFE_MAX_TOOL_INPUT = 4000;
-const SAFE_MAX_TOOL_OUTPUT = 8000;
-
 export function getOrInitBuffer(
   store: Map<string, MessageBuffer>,
-  messageId: string,
+  messageId: string
 ): MessageBuffer {
   let buf = store.get(messageId);
   if (!buf) {
@@ -91,30 +81,19 @@ export function markStatus(
   store: Map<string, MessageBuffer>,
   messageId: string,
   status: BufferStatus,
-  note?: string,
+  note?: string
 ) {
   const buf = getOrInitBuffer(store, messageId);
   buf.status = status;
   if (note) buf.statusNote = clipTail(String(note), 500);
 }
 
-/**
- * ⚠️ 这里不再做任何“UI排版”
- * 只输出稳定的“结构化分段”，方便 renderer 做折叠/卡片化/富文本
- *
- * 约定：
- * - ## Answer
- * - ## Thinking
- * - ## Tools
- * - ## Status
- */
 export function buildDisplayContent(buffer: MessageBuffer): string {
   const out: string[] = [];
 
-  // Answer（优先放前，方便 renderer 默认展开）
   out.push('## Answer');
   out.push(buffer.text ? clipTail(buffer.text, SAFE_MAX_TEXT) : '');
-  out.push(''); // blank line
+  out.push('');
 
   // Thinking
   if (buffer.reasoning && buffer.reasoning.trim()) {
@@ -123,7 +102,6 @@ export function buildDisplayContent(buffer: MessageBuffer): string {
     out.push('');
   }
 
-  // Tools（最朴素结构：renderer 自己决定如何折叠、排序、图标等）
   if (buffer.tools.size > 0) {
     out.push('## Tools');
 
@@ -139,7 +117,7 @@ export function buildDisplayContent(buffer: MessageBuffer): string {
           safeJsonStringify(t.input, SAFE_MAX_TOOL_INPUT)
             .split('\n')
             .map(l => `  ${l}`)
-            .join('\n'),
+            .join('\n')
         );
         out.push('  ```');
       }
@@ -151,7 +129,7 @@ export function buildDisplayContent(buffer: MessageBuffer): string {
           clipTail(t.output, SAFE_MAX_TOOL_OUTPUT)
             .split('\n')
             .map(l => `  ${l}`)
-            .join('\n'),
+            .join('\n')
         );
         out.push('  ```');
       }
@@ -163,7 +141,7 @@ export function buildDisplayContent(buffer: MessageBuffer): string {
           clipTail(t.error, SAFE_MAX_TOOL_OUTPUT)
             .split('\n')
             .map(l => `  ${l}`)
-            .join('\n'),
+            .join('\n')
         );
         out.push('  ```');
       }
@@ -184,18 +162,12 @@ export function buildDisplayContent(buffer: MessageBuffer): string {
   return out.join('\n');
 }
 
-/**
- * 把 Part（含 delta）累积到 buffer —— “抽象核心”
- * 这里只做数据累积，不做 UI 改动
- */
 export function applyPartToBuffer(buffer: MessageBuffer, part: Part, delta?: string) {
-  // text/reasoning：累积原始 delta（优先）
   if (part.type === 'text' || part.type === 'reasoning') {
     if (typeof delta === 'string' && delta.length > 0) {
       if (part.type === 'reasoning') buffer.reasoning += delta;
       else buffer.text += delta;
     } else if (typeof part.text === 'string') {
-      // snapshot 兜底：更长才覆盖
       const snap = part.text as string;
       if (part.type === 'reasoning' && snap.length > buffer.reasoning.length)
         buffer.reasoning = snap;
@@ -204,7 +176,6 @@ export function applyPartToBuffer(buffer: MessageBuffer, part: Part, delta?: str
     return;
   }
 
-  // tool：只做字段累积（不做展示逻辑）
   if (part.type === 'tool') {
     const toolPart = part as ToolPart;
 
@@ -223,24 +194,21 @@ export function applyPartToBuffer(buffer: MessageBuffer, part: Part, delta?: str
     view.tool = tool;
     view.status = state.status;
 
-    // input 在所有状态都有
     view.input = state.input;
 
-    // ✅ 这里用 switch，TS 会按你给的 ToolState 联合类型自动收窄
     switch (state.status) {
       case 'pending': {
-        // pending: 没 title/time/output/error
         break;
       }
 
       case 'running': {
-        if (state.title) view.title = state.title; // running: title?: string
+        if (state.title) view.title = state.title;
         if (state.time?.start) view.start = state.time.start;
         break;
       }
 
       case 'completed': {
-        view.title = state.title; // completed: title: string
+        view.title = state.title;
         view.output = state.output;
         if (state.time?.start) view.start = state.time.start;
         if (state.time?.end) view.end = state.time.end;

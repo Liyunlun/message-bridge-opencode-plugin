@@ -6,7 +6,6 @@ import { LOADING_EMOJI } from '../constants';
 import { AdapterMux } from './mux';
 
 import {
-  sleep,
   simpleHash,
   buildDisplayContent,
   getOrInitBuffer,
@@ -15,7 +14,8 @@ import {
   shouldFlushNow,
 } from '../bridge/buffer';
 
-// --- session/message 状态 ---
+import { sleep } from '../utils';
+
 type SessionContext = { chatId: string; senderId: string };
 
 const sessionToCtx = new Map<string, SessionContext>(); // sessionId -> chat context
@@ -42,7 +42,7 @@ async function safeEditWithRetry(
   adapter: BridgeAdapter,
   chatId: string,
   platformMsgId: string,
-  content: string,
+  content: string
 ): Promise<boolean> {
   const ok = await adapter.editMessage(chatId, platformMsgId, content);
   if (ok) return true;
@@ -54,7 +54,7 @@ async function flushMessage(
   adapter: BridgeAdapter,
   chatId: string,
   messageId: string,
-  force = false,
+  force = false
 ) {
   const buffer = msgBuffers.get(messageId);
   if (!buffer?.platformMsgId) return;
@@ -82,7 +82,6 @@ async function flushAll(mux: AdapterMux) {
   }
 }
 
-// --- 全局事件监听：只启动一次 ---
 export async function startGlobalEventListener(api: OpenCodeApi, mux: AdapterMux) {
   if (isListenerStarted) return;
   isListenerStarted = true;
@@ -101,7 +100,7 @@ export async function startGlobalEventListener(api: OpenCodeApi, mux: AdapterMux
       for await (const event of (events as any).stream) {
         if (shouldStopListener) break;
 
-        // 1) message.updated：记录 role + assistant 完成/错误/finish
+        // 1) message.updated
         if (event.type === 'message.updated') {
           const info = (event.properties as any)?.info;
           if (info?.id && info?.role) msgRole.set(info.id, info.role);
@@ -123,7 +122,7 @@ export async function startGlobalEventListener(api: OpenCodeApi, mux: AdapterMux
                   msgBuffers as any,
                   mid,
                   'aborted',
-                  info.error?.data?.message || 'aborted',
+                  info.error?.data?.message || 'aborted'
                 );
               } else if (isOutputLengthError(info.error)) {
                 markStatus(msgBuffers as any, mid, 'error', 'output too long');
@@ -132,14 +131,14 @@ export async function startGlobalEventListener(api: OpenCodeApi, mux: AdapterMux
                   msgBuffers as any,
                   mid,
                   'error',
-                  info.error?.data?.message || 'api error',
+                  info.error?.data?.message || 'api error'
                 );
               } else {
                 markStatus(
                   msgBuffers as any,
                   mid,
                   'error',
-                  info.error?.data?.message || info.error?.name || 'error',
+                  info.error?.data?.message || info.error?.name || 'error'
                 );
               }
               await flushMessage(adapter, ctx.chatId, mid, true);
@@ -185,7 +184,7 @@ export async function startGlobalEventListener(api: OpenCodeApi, mux: AdapterMux
                 msgBuffers as any,
                 messageId,
                 'done',
-                (part as any).reason || 'step-finish',
+                (part as any).reason || 'step-finish'
               );
             }
           }
@@ -235,7 +234,7 @@ export async function startGlobalEventListener(api: OpenCodeApi, mux: AdapterMux
                 msgBuffers as any,
                 mid,
                 'error',
-                err?.data?.message || err?.name || 'session.error',
+                err?.data?.message || err?.name || 'session.error'
               );
             }
             await flushMessage(adapter, ctx.chatId, mid, true);
@@ -320,7 +319,9 @@ export const createIncomingHandler = (api: OpenCodeApi, mux: AdapterMux, adapter
 
       let sessionId = sessionCache.get(cacheKey);
       if (!sessionId) {
-        const uniqueTitle = `[${adapterKey}] Chat ${chatId.slice(-4)} [${new Date().toLocaleTimeString()}]`;
+        const uniqueTitle = `[${adapterKey}] Chat ${chatId.slice(
+          -4
+        )} [${new Date().toLocaleTimeString()}]`;
         const res = await api.createSession({ body: { title: uniqueTitle } });
         sessionId = (res as any)?.data?.id;
         if (sessionId) sessionCache.set(cacheKey, sessionId);
