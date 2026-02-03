@@ -46,6 +46,8 @@ export class FeishuClient {
   private wsClient: lark.WSClient | null = null;
   private httpServer: http.Server | null = null;
   private cardServer: http.Server | null = null;
+  private callbackUrl?: string;
+  private callbackPort?: number;
 
   constructor(config: FeishuConfig) {
     this.config = config;
@@ -53,6 +55,15 @@ export class FeishuClient {
       appId: config.app_id,
       appSecret: config.app_secret,
     });
+    if (config.callback_url) {
+      this.callbackUrl = config.callback_url;
+      try {
+        const u = new URL(this.callbackUrl);
+        this.callbackPort = u.port ? Number(u.port) : undefined;
+      } catch {
+        // ignore
+      }
+    }
   }
 
   private isMessageProcessed(messageId: string): boolean {
@@ -204,7 +215,7 @@ export class FeishuClient {
     console.log('✅ Feishu WebSocket Connected!');
 
     // In WS mode, start a lightweight card-action webhook if port is provided.
-    if (this.config.port) {
+    if (this.callbackPort) {
       this.startCardActionServer(onMessage);
     } else {
       console.log('[Feishu] Card action server not started (no port in config).');
@@ -214,7 +225,7 @@ export class FeishuClient {
   async startWebhook(onMessage: IncomingMessageHandler) {
     if (this.httpServer) return;
 
-    const port = this.config.port || 8080;
+    const port = this.callbackPort || 8080;
     this.httpServer = http.createServer((req, res) => {
       if (req.method !== 'POST') {
         res.writeHead(405);
@@ -283,12 +294,17 @@ export class FeishuClient {
 
     this.httpServer.listen(port, () => {
       console.log(`✅ Feishu Webhook Server listening on port ${port}`);
+      if (this.callbackUrl) {
+        console.log(`[Feishu] Callback URL: ${this.callbackUrl}`);
+      } else {
+        console.log('[Feishu] Callback URL: http://<public-host>:' + port);
+      }
     });
   }
 
   private startCardActionServer(onMessage: IncomingMessageHandler) {
     if (this.cardServer) return;
-    const port = this.config.port || 8080;
+    const port = this.callbackPort || 8080;
     this.cardServer = http.createServer((req, res) => {
       if (req.method !== 'POST') {
         res.writeHead(405);
@@ -330,6 +346,11 @@ export class FeishuClient {
 
     this.cardServer.listen(port, () => {
       console.log(`✅ Feishu CardAction Server listening on port ${port}`);
+      if (this.callbackUrl) {
+        console.log(`[Feishu] CardAction URL: ${this.callbackUrl}`);
+      } else {
+        console.log('[Feishu] CardAction URL: http://<public-host>:' + port);
+      }
     });
   }
 

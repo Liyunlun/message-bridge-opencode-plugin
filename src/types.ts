@@ -27,7 +27,6 @@ export interface FeishuConfig {
   app_id: string;
   app_secret: string;
   mode: BridgeMode;
-  port?: number;
-  path?: string;
+  callback_url?: string;
   encrypt_key?: string;
 }

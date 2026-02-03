@@ -21,6 +21,27 @@ function parseFeishuConfig(options: Record<string, any>): FeishuConfig {
   const app_id = options.app_id;
   const app_secret = options.app_secret;
   const mode = (options.mode || 'ws') as 'ws' | 'webhook';
+  const callbackUrlRaw = options.callback_url;
+  const callbackUrl =
+    typeof callbackUrlRaw === 'string' && callbackUrlRaw.length > 0
+      ? callbackUrlRaw.startsWith('http')
+        ? callbackUrlRaw
+        : `http://${callbackUrlRaw}`
+      : undefined;
+
+  if (mode === 'webhook' && !callbackUrl) {
+    console.error('[FeishuBridge] Missing callback_url in webhook mode');
+  }
+
+  let port: string | number | undefined;
+  if (callbackUrl) {
+    try {
+      const u = new URL(callbackUrl);
+      if (u.port) port = u.port;
+    } catch {
+      // ignore
+    }
+  }
 
   if (!app_id || !app_secret) {
     throw new Error(`[FeishuBridge] Missing options: app_id/app_secret in agent["${AGENT_LARK}"]`);
@@ -30,8 +51,7 @@ function parseFeishuConfig(options: Record<string, any>): FeishuConfig {
     app_id,
     app_secret,
     mode,
-    port: options.port,
-    path: options.path,
+    callback_url: callbackUrl,
     encrypt_key: options.encrypt_key,
   };
 }

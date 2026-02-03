@@ -25,6 +25,27 @@ function parseFeishuConfig(cfg: Config): FeishuConfig {
   const app_id = options.app_id;
   const app_secret = options.app_secret;
   const mode = (options.mode || 'ws') as 'ws' | 'webhook';
+  const callbackUrlRaw = options.callback_url;
+  const callbackUrl =
+    typeof callbackUrlRaw === 'string' && callbackUrlRaw.length > 0
+      ? callbackUrlRaw.startsWith('http')
+        ? callbackUrlRaw
+        : `http://${callbackUrlRaw}`
+      : undefined;
+
+  if (mode === 'webhook' && !callbackUrl) {
+    console.error(`[Plugin] Missing callback_url for ${AGENT_LARK} in webhook mode`);
+  }
+
+  let port: string | number | undefined;
+  if (callbackUrl) {
+    try {
+      const u = new URL(callbackUrl);
+      if (u.port) port = u.port;
+    } catch {
+      // ignore
+    }
+  }
 
   if (!app_id || !app_secret) {
     throw new Error(`[Plugin] Missing options for ${AGENT_LARK}: app_id/app_secret`);
@@ -34,8 +55,7 @@ function parseFeishuConfig(cfg: Config): FeishuConfig {
     app_id,
     app_secret,
     mode,
-    port: options.port,
-    path: options.path,
+    callback_url: callbackUrl,
     encrypt_key: options.encrypt_key,
   };
 }

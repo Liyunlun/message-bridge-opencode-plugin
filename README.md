@@ -162,8 +162,7 @@ npm install message-bridge-opencode-plugin
         "mode": "webhook",
         "app_id": "cli_xxxxxxx",
         "app_secret": "xxxxxxxxxx",
-        "port": "3000",
-        "path": "127.0.0.1"
+        "callback_url": "127.0.0.1:3000"
       }
     }
   }
