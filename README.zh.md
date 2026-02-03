@@ -144,7 +144,7 @@ npm install message-bridge-opencode-plugin
   "$schema": "https://opencode.ai/config.json",
   "plugin": ["message-bridge-opencode-plugin"],
   "agent": {
-    "message-bridge": {
+    "lark-bridge": {
       "disable": false,
       "description": "Message Bridge Plugin",
       "options": {
@@ -167,7 +167,7 @@ npm install message-bridge-opencode-plugin
   "$schema": "https://opencode.ai/config.json",
   "plugin": ["message-bridge-opencode-plugin"],
   "agent": {
-    "message-bridge": {
+    "lark-bridge": {
       "disable": false,
       "description": "Message Bridge Plugin",
       "options": {

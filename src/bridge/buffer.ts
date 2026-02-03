@@ -94,7 +94,7 @@ export function markStatus(
 export function buildDisplayContent(buffer: MessageBuffer): string {
   const out: string[] = [];
 
-  out.push(buffer.isCommand ? '## Command 🧭' : '## Answer');
+  out.push(buffer.isCommand ? '## Command' : '## Answer');
   out.push(buffer.text ? clipTail(buffer.text, SAFE_MAX_TEXT) : '');
   out.push('');
 

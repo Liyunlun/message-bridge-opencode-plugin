@@ -49,6 +49,7 @@ function getStatusWithEmoji(statusText: string): string {
 
 function parseSections(md: string) {
   const sectionMap: Record<string, string> = {
+    command: '',
     thinking: '',
     answer: '',
     tools: '',
@@ -85,6 +86,8 @@ function parseSections(md: string) {
 
     if (rawTitle.includes('think') || rawTitle.includes('思')) {
       sectionMap.thinking += content;
+    } else if (rawTitle.includes('command') || rawTitle.includes('命令')) {
+      sectionMap.command += content;
     } else if (
       rawTitle.includes('tool') ||
       rawTitle.includes('step') ||
@@ -103,22 +106,123 @@ function parseSections(md: string) {
     headerRegex.lastIndex = nextMatch.index;
   }
 
-  if (!sectionMap.answer && !sectionMap.thinking && !sectionMap.status) {
+  if (
+    !sectionMap.answer &&
+    !sectionMap.command &&
+    !sectionMap.thinking &&
+    !sectionMap.status
+  ) {
     sectionMap.answer = cleanMd;
   }
 
   return sectionMap;
 }
 
+function renderHelpCommand(command: string): any[] | null {
+  const lines = command
+    .split('\n')
+    .map(l => l.trim())
+    .filter(Boolean);
+
+  const helpIndex = lines.findIndex(l => /^###\s*help/i.test(l));
+  if (helpIndex === -1) return null;
+
+  const elements: any[] = [];
+  const commandLines: string[] = [];
+
+  for (let i = helpIndex + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^###\s*/.test(line)) break;
+    if (line.startsWith('/')) commandLines.push(line);
+  }
+
+  if (commandLines.length === 0) return null;
+
+  elements.push(larkMd('**Help**'));
+  elements.push(larkMd(commandLines.map(l => `- ${l}`).join('\n')));
+
+  const buttons: any[] = [];
+  commandLines.forEach(l => {
+    const cmd = l.split(/\s+/)[0];
+    buttons.push({
+      tag: 'button',
+      text: { tag: 'plain_text', content: cmd },
+      type: 'primary',
+      value: { cmd },
+    });
+  });
+
+  const rows: any[] = [];
+  const maxPerRow = 4;
+  for (let i = 0; i < Math.min(buttons.length, 12); i += maxPerRow) {
+    rows.push({
+      tag: 'action',
+      actions: buttons.slice(i, i + maxPerRow),
+    });
+  }
+
+  elements.push(...rows);
+  return elements;
+}
+
+function renderModelsCommand(command: string): any[] | null {
+  const lines = command
+    .split('\n')
+    .map(l => l.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0 || !/^###\s*models/i.test(lines[0])) return null;
+
+  const elements: any[] = [];
+  elements.push(larkMd('**Available Models**'));
+
+  let i = 1;
+  const defaults: string[] = [];
+  if (lines[i] && /^default:/i.test(lines[i])) {
+    i++;
+    while (i < lines.length && !/^\S+.*\(.+\)$/.test(lines[i])) {
+      defaults.push(lines[i]);
+      i++;
+    }
+  }
+
+  if (defaults.length > 0) {
+    elements.push(larkMd(`**Default**\n${defaults.map(d => `- ${d}`).join('\n')}`));
+  }
+
+  const providers: Array<{ title: string; models: string }> = [];
+  while (i < lines.length) {
+    const title = lines[i];
+    const modelsLine = lines[i + 1] || '';
+    if (/^\S+.*\(.+\)$/.test(title) && /^models:/i.test(modelsLine)) {
+      providers.push({ title, models: modelsLine.replace(/^models:\s*/i, '') });
+      i += 2;
+      continue;
+    }
+    i++;
+  }
+
+  if (providers.length > 0) {
+    providers.forEach(p => {
+      elements.push(larkMd(`**${p.title}**\n${p.models || '-'}`));
+    });
+  }
+
+  return elements.length ? elements : null;
+}
+
 export function renderFeishuCardFromHandlerMarkdown(handlerMarkdown: string): string {
-  const { thinking, answer, tools, status } = parseSections(handlerMarkdown);
+  const { command, thinking, answer, tools, status } = parseSections(handlerMarkdown);
 
   const elements: any[] = [];
 
   let headerTitle = '🤖 AI Assistant';
   let headerColor = 'blue';
 
-  if (trimSafe(answer)) {
+  if (trimSafe(command)) {
+    headerTitle = '🧭 Command';
+    headerColor = 'green';
+  } else if (trimSafe(answer)) {
     headerTitle = '📝 Answer';
     headerColor = 'blue';
   } else if (trimSafe(tools)) {
@@ -138,7 +242,27 @@ export function renderFeishuCardFromHandlerMarkdown(handlerMarkdown: string): st
     elements.push(collapsiblePanel('⚙️ Execution', tools, false));
   }
 
+  const finalCommand = trimSafe(command);
   const finalAnswer = trimSafe(answer);
+
+  if (finalCommand) {
+    const helpElements = renderHelpCommand(finalCommand);
+    const modelsElements = helpElements ? null : renderModelsCommand(finalCommand);
+    const rendered = helpElements || modelsElements;
+
+    if (rendered) {
+      elements.push(...rendered);
+    } else {
+      elements.push({
+        tag: 'div',
+        text: {
+          tag: 'lark_md',
+          content: finalCommand,
+        },
+      });
+    }
+  }
+
   if (finalAnswer) {
     if (elements.length > 0) elements.push({ tag: 'hr' });
 

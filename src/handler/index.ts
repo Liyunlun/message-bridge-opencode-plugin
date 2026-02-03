@@ -38,21 +38,6 @@ function isApiError(err: any): boolean {
   return err?.name === 'APIError';
 }
 
-async function syncSessionToTui(api: OpencodeClient, sessionId: string) {
-  const selectSession = (api as any)?.tui?.selectSession;
-  if (typeof selectSession !== 'function') {
-    console.log('[Bridge] TUI selectSession not supported (v1).');
-    return;
-  }
-  try {
-    await selectSession({ body: { sessionID: sessionId } });
-    console.log(`[Bridge] TUI synced to session: ${sessionId}`);
-  } catch {
-    // ignore if unsupported
-    console.log('[Bridge] TUI selectSession failed (unsupported or error).');
-  }
-}
-
 async function safeEditWithRetry(
   adapter: BridgeAdapter,
   chatId: string,
@@ -397,6 +382,17 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
         await adapter.sendMessage(chatId, `❌ 命令 /${slash?.command} 暂不支持在聊天中使用。`);
       };
 
+      const isKnownCustomCommand = async (name: string): Promise<boolean | null> => {
+        try {
+          const res = await api.command.list();
+          const data = (res as any)?.data ?? res;
+          const list = Array.isArray(data) ? data : [];
+          return list.some((cmd: any) => cmd?.name === name);
+        } catch {
+          return null;
+        }
+      };
+
       if (slash) {
         if (normalizedCommand === 'help') {
           const res = await api.command.list();
@@ -404,8 +400,8 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           const list = Array.isArray(data) ? data : [];
 
           const lines: string[] = [];
-          lines.push('🧰 Command Help');
-          lines.push('────────────────────────');
+          lines.push('## Command');
+          lines.push('### Help');
           lines.push('/help - 查看命令与用法');
           lines.push('/models - 查看可用模型');
           lines.push('/new - 新建会话并切换');
@@ -417,8 +413,7 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           lines.push('/agent <name> - 切换 Agent');
 
           if (list.length > 0) {
-            lines.push('────────────────────────');
-            lines.push('🧩 Custom Commands');
+            lines.push('### Custom Commands');
             list.forEach((cmd: any) => {
               const desc = cmd?.description ? `- ${cmd.description}` : '';
               lines.push(`/${cmd?.name} ${desc}`);
@@ -440,8 +435,8 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           }
 
           const lines: string[] = [];
-          lines.push('🧠 Available Models');
-          lines.push('────────────────────────');
+          lines.push('## Command');
+          lines.push('### Models');
 
           const defaultLines: string[] = [];
           Object.keys(defaults || {}).forEach(key => {
@@ -450,7 +445,6 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           if (defaultLines.length > 0) {
             lines.push('Default:');
             defaultLines.forEach(l => lines.push(l));
-            lines.push('────────────────────────');
           }
 
           providers.forEach((p: any) => {
@@ -458,7 +452,6 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
             const models = p?.models ? Object.keys(p.models) : [];
             lines.push(`${p?.name || id} (${id})`);
             lines.push(`Models: ${models.join(', ') || '-'}`);
-            lines.push('────────────────────────');
           });
 
           await adapter.sendMessage(chatId, lines.join('\n'));
@@ -497,7 +490,6 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           const sessionId = await createNewSession();
           console.log(`[Bridge] [${adapterKey}] [Session: ${sessionId}] 🆕 New Session Bound.`);
           if (sessionId) {
-            await syncSessionToTui(api, sessionId);
             await adapter.sendMessage(chatId, `✅ 已切换到新会话: ${sessionId}`);
           } else {
             await adapter.sendMessage(chatId, '❌ 新会话创建失败，请稍后重试。');
@@ -516,7 +508,6 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           sessionToAdapterKey.set(targetSessionId, adapterKey);
           sessionToCtx.set(targetSessionId, { chatId, senderId });
           chatAgent.delete(cacheKey);
-          await syncSessionToTui(api, targetSessionId);
           await adapter.sendMessage(chatId, `✅ 已切换到会话: ${targetSessionId}`);
           return;
         }
@@ -547,6 +538,12 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
           return;
         }
 
+        const isCustom = await isKnownCustomCommand(slash.command);
+        if (isCustom === false) {
+          await adapter.sendMessage(chatId, `❌ 无效指令: /${slash.command}`);
+          return;
+        }
+
         await api.session.command({
           path: { id: sessionId },
           body: { command: slash.command, arguments: slash.arguments },
@@ -561,7 +558,6 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
       sessionToCtx.set(sessionId, { chatId, senderId });
 
       const agent = chatAgent.get(cacheKey);
-      await syncSessionToTui(api, sessionId);
       await api.session.prompt({
         path: { id: sessionId },
         body: { parts: [{ type: 'text', text }], ...(agent ? { agent } : {}) },
