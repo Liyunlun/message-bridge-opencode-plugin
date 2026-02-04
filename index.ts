@@ -11,6 +11,7 @@ import { startGlobalEventListener, createIncomingHandler } from './src/handler';
 import { FeishuAdapter } from './src/feishu/feishu.adapter';
 import type { FeishuConfig, BridgeAdapter } from './src/types';
 
+// isEnabled
 function isEnabled(cfg: Config, key: string): boolean {
   const node = cfg?.agent?.[key];
   if (!node) return false;
