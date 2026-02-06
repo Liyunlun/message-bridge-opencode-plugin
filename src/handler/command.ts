@@ -74,7 +74,8 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     lines.push('/unshare - 取消分享');
     lines.push('/compact - 压缩/总结当前会话');
     lines.push('/init - 初始化项目（生成 AGENTS.md）');
-    lines.push('/agent <序号> - 切换 Agent');
+    lines.push('/agent - 列出 Agents');
+    lines.push('/agent <序号|name> - 切换 Agent（序号或精确名称）');
 
     if (list.length > 0) {
       lines.push('### Custom Commands');
@@ -193,19 +194,29 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   }
 
   if (normalizedCommand === 'agent' && targetAgent) {
-    if (!/^\d+$/.test(targetAgent)) {
-      await sendCommandMessage('❌ 请输入 /agent <序号> 切换。');
+    if (/^\d+$/.test(targetAgent)) {
+      const list = chatAgentList.get(cacheKey) || [];
+      const idx = Number(targetAgent) - 1;
+      if (idx < 0 || idx >= list.length) {
+        await sendCommandMessage(`❌ 无效序号: ${targetAgent}`);
+        return true;
+      }
+      const agent = list[idx];
+      chatAgent.set(cacheKey, agent.name || agent.id);
+      await sendCommandMessage(`✅ 已切换 Agent: ${agent.name || agent.id}`);
       return true;
     }
-    const list = chatAgentList.get(cacheKey) || [];
-    const idx = Number(targetAgent) - 1;
-    if (idx < 0 || idx >= list.length) {
-      await sendCommandMessage(`❌ 无效序号: ${targetAgent}`);
+
+    const res = await api.app.agents();
+    const data = (res as any)?.data ?? res;
+    const list = Array.isArray(data) ? data : [];
+    const exact = list.find((a: any) => a?.name === targetAgent || a?.id === targetAgent);
+    if (!exact) {
+      await sendCommandMessage(`❌ 未找到 Agent: ${targetAgent}`);
       return true;
     }
-    const agent = list[idx];
-    chatAgent.set(cacheKey, agent.name || agent.id);
-    await sendCommandMessage(`✅ 已切换 Agent: ${agent.name || agent.id}`);
+    chatAgent.set(cacheKey, exact.name || exact.id);
+    await sendCommandMessage(`✅ 已切换 Agent: ${exact.name || exact.id}`);
     return true;
   }
 
@@ -222,7 +233,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
       name: a?.name || a?.id,
     }));
     chatAgentList.set(cacheKey, agents);
-    const lines = ['## Command', '### Agents', '请输入 /agent <序号> 切换：'];
+    const lines = ['## Command', '### Agents', '请输入 /agent <序号> 或 <name> 切换：'];
     agents.forEach((a, idx) => {
       lines.push(`${idx + 1}. ${a.name} (${a.id})`);
     });
