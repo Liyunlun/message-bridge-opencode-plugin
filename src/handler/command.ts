@@ -31,24 +31,6 @@ export type CommandContext = {
   isKnownCustomCommand: (name: string) => Promise<boolean | null>;
 };
 
-async function resolveAgentName(
-  api: OpencodeClient,
-  name: string
-): Promise<{ id: string; name: string } | null> {
-  try {
-    const res = await api.app.agents();
-    const data = (res as any)?.data ?? res;
-    const list = Array.isArray(data) ? data : [];
-    if (list.length === 0) return null;
-    const exact = list.find((a: any) => a?.name === name || a?.id === name);
-    if (exact) return { id: exact.id, name: exact.name };
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> {
   const {
     api,
@@ -83,7 +65,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     lines.push('## Command');
     lines.push('### Help');
     lines.push('/help - 查看命令与用法');
-    lines.push('/models - 查看可用模型');
+    lines.push('/models - 查看可用模型（/models <序号> 切换）');
     lines.push('/new - 新建会话并切换');
     lines.push('/sessions - 列出会话（用 /sessions <id> 或 /sessions <序号> 切换）');
     lines.push('/maxFileSize <xmb> - 设置上传文件大小限制（默认10MB）');
@@ -92,7 +74,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     lines.push('/unshare - 取消分享');
     lines.push('/compact - 压缩/总结当前会话');
     lines.push('/init - 初始化项目（生成 AGENTS.md）');
-    lines.push('/agent <序号|name> - 切换 Agent（序号或精确名称）');
+    lines.push('/agent <序号> - 切换 Agent');
 
     if (list.length > 0) {
       lines.push('### Custom Commands');
@@ -107,12 +89,48 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
 
   if (normalizedCommand === 'models') {
     const res = await api.config.providers();
-    const data = (res as any)?.data ?? res;
+    const data = res?.data;
     const providers = data?.providers ?? [];
     const defaults = data?.default ?? {};
 
     if (!Array.isArray(providers) || providers.length === 0) {
       await sendCommandMessage('暂无可用模型信息。');
+      return true;
+    }
+
+    if (slash.arguments) {
+      const arg = slash.arguments.trim();
+      const m = arg.match(/^(\d+)\.(\d+)$/);
+      if (!m) {
+        await sendCommandMessage('❌ 无效序号，请使用 /models 1.2');
+        return true;
+      }
+      const pIdx = Number(m[1]) - 1;
+      const mIdx = Number(m[2]) - 1;
+      if (pIdx < 0 || mIdx < 0 || pIdx >= providers.length) {
+        await sendCommandMessage(`❌ 无效序号: ${arg}`);
+        return true;
+      }
+      const p = providers[pIdx];
+      const modelKeys = Object.keys(p?.models || {});
+      if (mIdx >= modelKeys.length) {
+        await sendCommandMessage(`❌ 无效序号: ${arg}`);
+        return true;
+      }
+      const key = modelKeys[mIdx];
+      const model = p.models?.[key];
+      const modelId = model?.id;
+      if (!modelId) {
+        await sendCommandMessage(`❌ 模型ID缺失: ${arg}`);
+        return true;
+      }
+
+      const sessionId = await ensureSession();
+      await api.session.command({
+        path: { id: sessionId },
+        body: { command: 'model', arguments: modelId },
+      });
+      await sendCommandMessage(`✅ 已切换模型: ${model?.name || modelId}`);
       return true;
     }
 
@@ -131,11 +149,9 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     }
 
     providers.forEach((p, index) => {
-      const num = index + 1;
-      const id = p?.id || p?.name;
-      const models = p?.models ? Object.keys(p.models) : [];
-      lines.push(`${num}. ${p?.name || id} (${id})`);
-      lines.push(`Models: \n ${models.join('\n')}`);
+      Object.keys(p.models).forEach((key, idx) => {
+        lines.push(`${index + 1}.${idx + 1}. ${p.models[key].name} (${p.models[key].id})`);
+      });
     });
 
     await sendCommandMessage(lines.join('\n'));
@@ -177,24 +193,17 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   }
 
   if (normalizedCommand === 'agent' && targetAgent) {
-    if (/^\d+$/.test(targetAgent)) {
-      const list = chatAgentList.get(cacheKey) || [];
-      const idx = Number(targetAgent) - 1;
-      if (idx < 0 || idx >= list.length) {
-        await sendCommandMessage(`❌ 无效序号: ${targetAgent}`);
-        return true;
-      }
-      const agent = list[idx];
-      chatAgent.set(cacheKey, agent.name || agent.id);
-      await sendCommandMessage(`✅ 已切换 Agent: ${agent.name || agent.id}`);
+    if (!/^\d+$/.test(targetAgent)) {
+      await sendCommandMessage('❌ 请输入 /agent <序号> 切换。');
       return true;
     }
-
-    const agent = await resolveAgentName(api, targetAgent);
-    if (!agent) {
-      await sendCommandMessage(`❌ 未找到 Agent: ${targetAgent}`);
+    const list = chatAgentList.get(cacheKey) || [];
+    const idx = Number(targetAgent) - 1;
+    if (idx < 0 || idx >= list.length) {
+      await sendCommandMessage(`❌ 无效序号: ${targetAgent}`);
       return true;
     }
+    const agent = list[idx];
     chatAgent.set(cacheKey, agent.name || agent.id);
     await sendCommandMessage(`✅ 已切换 Agent: ${agent.name || agent.id}`);
     return true;
@@ -213,7 +222,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
       name: a?.name || a?.id,
     }));
     chatAgentList.set(cacheKey, agents);
-    const lines = ['## Command', '### Agents', '请输入 /agent <序号> 或 <name> 切换：'];
+    const lines = ['## Command', '### Agents', '请输入 /agent <序号> 切换：'];
     agents.forEach((a, idx) => {
       lines.push(`${idx + 1}. ${a.name} (${a.id})`);
     });
