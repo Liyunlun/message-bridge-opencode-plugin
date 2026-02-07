@@ -501,7 +501,6 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   if (normalizedCommand === 'new') {
     const sessionId = await createNewSession();
     if (sessionId) {
-      chatAgent.delete(cacheKey);
       chatModel.delete(cacheKey);
       await sendCommandMessage(`✅ 已切换到新会话: ${sessionId}`);
     } else {

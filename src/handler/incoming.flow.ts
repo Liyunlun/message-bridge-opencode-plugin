@@ -11,6 +11,7 @@ type SessionContext = { chatId: string; senderId: string };
 type SelectedModel = { providerID: string; modelID: string; name?: string };
 type NamedRecord = { id?: string; name?: string; title?: string; description?: string };
 type DataEnvelope = { data?: unknown };
+const DEFAULT_AGENT_ID = 'plan';
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null;
@@ -126,7 +127,7 @@ export const createIncomingHandlerWithDeps = (
           deps.sessionCache.set(cacheKey, sessionId);
           deps.sessionToAdapterKey.set(sessionId, adapterKey);
           deps.sessionToCtx.set(sessionId, { chatId, senderId });
-          deps.chatAgent.delete(cacheKey);
+          deps.chatAgent.set(cacheKey, DEFAULT_AGENT_ID);
           deps.chatModel.delete(cacheKey);
         }
         return sessionId;
