@@ -1,7 +1,11 @@
 // src/handler/command.ts
 import type { FilePartInput, OpencodeClient, TextPartInput } from '@opencode-ai/sdk';
-import { DEFAULT_MAX_FILE_MB, DEFAULT_MAX_FILE_RETRY, globalState } from '../utils';
-import { isBridgeAgentId } from '../constants';
+import {
+  DEFAULT_MAX_FILE_MB,
+  DEFAULT_MAX_FILE_RETRY,
+  globalState,
+  isBridgeAgentId,
+} from '../utils';
 import { bridgeLogger, getBridgeLogFilePath } from '../logger';
 
 type SessionListItem = { id: string; title: string };
@@ -501,7 +505,6 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   if (normalizedCommand === 'new') {
     const sessionId = await createNewSession();
     if (sessionId) {
-      chatModel.delete(cacheKey);
       await sendCommandMessage(`✅ 已切换到新会话: ${sessionId}`);
     } else {
       await sendCommandMessage('❌ 新会话创建失败，请稍后重试。');
