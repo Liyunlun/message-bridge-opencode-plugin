@@ -32,6 +32,7 @@ import {
 } from './execution.flow';
 
 type SessionContext = { chatId: string; senderId: string };
+type SelectedModel = { providerID: string; modelID: string; name?: string };
 type ListenerState = { isListenerStarted: boolean; shouldStopListener: boolean };
 type EventWithType = { type: string; properties?: unknown };
 type EventMessageBuffer = MessageBuffer & { __executionCarried?: boolean };
@@ -45,6 +46,7 @@ export type EventFlowDeps = {
   sessionCache: Map<string, string>;
   sessionToAdapterKey: Map<string, string>;
   chatAgent: Map<string, string>;
+  chatModel: Map<string, SelectedModel>;
   chatSessionList: Map<string, Array<{ id: string; title: string }>>;
   chatAgentList: Map<string, Array<{ id: string; name: string }>>;
   chatMaxFileSizeMb: Map<string, number>;
@@ -191,6 +193,8 @@ async function handleMessagePartUpdatedEvent(
   const target = resolveSessionTarget(sessionId, mux, deps);
   if (!target) return;
   const { ctx, adapter } = target;
+  const adapterKey = deps.sessionToAdapterKey.get(sessionId);
+  const cacheKey = adapterKey ? `${adapterKey}:${ctx.chatId}` : '';
 
   const prev = deps.sessionActiveMsg.get(sessionId);
   if (prev && prev !== messageId) {
@@ -202,6 +206,9 @@ async function handleMessagePartUpdatedEvent(
         `${FLOW_LOG_PREFIX} carry execution message sid=${sessionId} prev=${prev} next=${messageId}`,
       );
     } else {
+      console.log(
+        `[BridgeFlowDebug] do-not-carry sid=${sessionId} prev=${prev} next=${messageId} prevPlatform=${prevBuf?.platformMsgId || '-'} prevTextLen=${(prevBuf?.text || '').length} prevReasoningLen=${(prevBuf?.reasoning || '').length} prevTools=${prevBuf?.tools?.size || 0}`,
+      );
       markStatus(deps.msgBuffers, prev, 'done');
       await flushMessage(adapter, ctx.chatId, prev, deps.msgBuffers, true);
     }
@@ -209,7 +216,16 @@ async function handleMessagePartUpdatedEvent(
   deps.sessionActiveMsg.set(sessionId, messageId);
 
   const buffer = getOrInitBuffer(deps.msgBuffers, messageId);
+  if (cacheKey) {
+    const selectedAgent = deps.chatAgent.get(cacheKey);
+    const selectedModel = deps.chatModel.get(cacheKey);
+    buffer.selectedAgent = selectedAgent;
+    buffer.selectedModel = selectedModel;
+  }
   applyPartToBuffer(buffer, part, delta);
+  console.log(
+    `[BridgeFlowDebug] part-applied sid=${sessionId} mid=${messageId} part=${part.type} textLen=${buffer.text.length} reasoningLen=${buffer.reasoning.length} tools=${buffer.tools.size} status=${buffer.status} note="${buffer.statusNote || ''}" hasPlatform=${!!buffer.platformMsgId}`,
+  );
 
   if (shouldSplitOutFinalAnswer(buffer)) {
     console.log(
@@ -223,15 +239,24 @@ async function handleMessagePartUpdatedEvent(
     markStatus(deps.msgBuffers, messageId, 'done', part.reason || 'step-finish');
   }
 
-  if (!shouldFlushNow(buffer)) return;
+  if (!shouldFlushNow(buffer)) {
+    console.log(`[BridgeFlowDebug] skip-flush sid=${sessionId} mid=${messageId} reason=throttle`);
+    return;
+  }
   const hasAny = buffer.reasoning.length > 0 || buffer.text.length > 0 || buffer.tools.size > 0;
-  if (!hasAny) return;
+  if (!hasAny) {
+    console.log(`[BridgeFlowDebug] skip-flush sid=${sessionId} mid=${messageId} reason=empty`);
+    return;
+  }
 
   buffer.lastUpdateTime = Date.now();
 
   const display = buildPlatformDisplay(buffer);
   const hash = simpleHash(display);
-  if (buffer.platformMsgId && hash === buffer.lastDisplayHash) return;
+  if (buffer.platformMsgId && hash === buffer.lastDisplayHash) {
+    console.log(`[BridgeFlowDebug] skip-flush sid=${sessionId} mid=${messageId} reason=same-hash`);
+    return;
+  }
 
   if (!buffer.platformMsgId) {
     console.log(
@@ -247,8 +272,15 @@ async function handleMessagePartUpdatedEvent(
 
   const ok = await safeEditWithRetry(adapter, ctx.chatId, buffer.platformMsgId, display);
   if (ok) {
+    console.log(
+      `[BridgeFlowDebug] edited sid=${sessionId} mid=${messageId} msg=${ok} contentLen=${display.length}`,
+    );
     buffer.platformMsgId = ok;
     buffer.lastDisplayHash = hash;
+  } else {
+    console.log(
+      `[BridgeFlowDebug] edit-failed sid=${sessionId} mid=${messageId} msg=${buffer.platformMsgId} contentLen=${display.length}`,
+    );
   }
 }
 
@@ -315,7 +347,10 @@ export async function startGlobalEventListenerWithDeps(
   mux: AdapterMux,
   deps: EventFlowDeps,
 ) {
-  if (deps.listenerState.isListenerStarted) return;
+  if (deps.listenerState.isListenerStarted) {
+    console.log('[BridgeFlowDebug] listener already started, skip');
+    return;
+  }
   deps.listenerState.isListenerStarted = true;
   deps.listenerState.shouldStopListener = false;
 
@@ -339,6 +374,11 @@ export async function startGlobalEventListenerWithDeps(
         }
 
         if (e.type === 'message.part.updated') {
+          const pe = event as EventMessagePartUpdated;
+          const p = pe.properties.part;
+          console.log(
+            `[BridgeFlowDebug] part.updated sid=${p.sessionID} mid=${p.messageID} type=${p.type} deltaLen=${(pe.properties.delta || '').length}`,
+          );
           await handleMessagePartUpdatedEvent(event as EventMessagePartUpdated, mux, deps);
           continue;
         }
@@ -386,6 +426,7 @@ export function stopGlobalEventListenerWithDeps(deps: EventFlowDeps) {
   deps.sessionCache.clear();
   deps.sessionToAdapterKey.clear();
   deps.chatAgent.clear();
+  deps.chatModel.clear();
   deps.chatSessionList.clear();
   deps.chatAgentList.clear();
   deps.chatMaxFileSizeMb.clear();

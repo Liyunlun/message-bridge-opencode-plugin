@@ -81,6 +81,7 @@ From the official TUI docs, the built-in commands include:
 * `/init`
 * `/models`
 * `/new` (alias: `/clear`)
+* `/reset` (alias: `/restart`)
 * `/redo`
 * `/sessions` (aliases: `/resume`, `/continue`)
 * `/share`
@@ -88,23 +89,30 @@ From the official TUI docs, the built-in commands include:
 * `/thinking`
 * `/undo`
 * `/unshare`
+* `/status`
 * `/maxFileSize`
 * `/maxFileRetry`
+* `/agent`
 
 ### Bridge-Handled Commands
 
 These are implemented directly against OpenCode APIs:
 
 * `/help` → list custom commands
-* `/models` → list providers and models
+* `/models` → list providers and models (`/models <providerIndex.modelIndex>` to switch)
 * `/new` → create and bind to a new session
-* `/sessions` → list sessions (reply with `/sessions <id>` to bind)
+* `/reset` / `/restart` → reset bridge runtime state and create a new session
+* `/status` → show runtime status (session / agent / model / pid / uptime)
+* `/sessions` → list sessions (reply with `/sessions <id>` or `/sessions <index>` to bind)
+* `/sessions delete 1,2,3` → batch delete sessions by index/id
+* `/sessions delete all` → delete all sessions except current one
 * `/maxFileSize <xmb>` → set upload file size limit (default 10MB)
 * `/maxFileRetry <n>` → set resource download retry count (default 3)
 * `/share` / `/unshare`
 * `/compact` (alias `/summarize`)
 * `/init`
-* `/agent <name>` → bind agent for future prompts
+* `/agent` → list available agents
+* `/agent <index|name>` → bind agent for future prompts
 
 ### UI-Only Commands (Not Supported in Chat)
 
@@ -126,6 +134,7 @@ Custom commands are supported via:
 ### Session / Agent Switching
 
 Session switching via `/sessions` is fully supported. The list is returned to the chat, and you can reply with `/sessions <id>` **or** `/sessions <index>` to bind this chat to the chosen session.
+Session batch deletion is supported via `/sessions delete ...`, and `/sessions delete all` keeps the current active session.
 File upload size limit can be adjusted per chat with `/maxFileSize <xmb>` (default 10MB).
 
 If your OpenCode setup provides additional slash commands, they will still be forwarded via `session.command` unless explicitly handled above.

@@ -31,6 +31,8 @@ export interface MessageBuffer {
   text: string; // 原始 answer text
   tools: Map<string, ToolView>; // callID -> tool
   files: Array<{ filename?: string; mime: string; url: string }>;
+  selectedAgent?: string;
+  selectedModel?: { providerID: string; modelID: string; name?: string };
   lastUpdateTime: number;
   lastDisplayHash: string;
   status: BufferStatus;
@@ -173,6 +175,12 @@ export function buildDisplayContent(buffer: MessageBuffer): string {
   // Status（纯字段，无 label/emoji）
   out.push('## Status');
   out.push(`${buffer.status}${buffer.statusNote ? `: ${buffer.statusNote}` : ''}`);
+  out.push(`agent: ${buffer.selectedAgent || 'default'}`);
+  if (buffer.selectedModel) {
+    const model = buffer.selectedModel;
+    const modelLabel = model.name || model.modelID;
+    out.push(`model: ${model.providerID}/${modelLabel}`);
+  }
 
   return out.join('\n');
 }

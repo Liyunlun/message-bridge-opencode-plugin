@@ -7,6 +7,7 @@ import { startGlobalEventListenerWithDeps, stopGlobalEventListenerWithDeps } fro
 import { globalState } from '../utils';
 
 type SessionContext = { chatId: string; senderId: string };
+type SelectedModel = { providerID: string; modelID: string; name?: string };
 
 const sessionToCtx = new Map<string, SessionContext>(); // sessionId -> chat context
 const sessionActiveMsg = new Map<string, string>(); // sessionId -> active assistant messageID
@@ -15,6 +16,7 @@ const msgBuffers = new Map<string, MessageBuffer>(); // messageId -> buffer
 const sessionCache = new Map<string, string>(); // adapterKey:chatId -> sessionId
 const sessionToAdapterKey = new Map<string, string>(); // sessionId -> adapterKey
 const chatAgent = new Map<string, string>(); // adapterKey:chatId -> agent
+const chatModel = new Map<string, SelectedModel>(); // adapterKey:chatId -> model
 const chatSessionList = new Map<string, Array<{ id: string; title: string }>>();
 const chatAgentList = new Map<string, Array<{ id: string; name: string }>>();
 const chatMaxFileSizeMb: Map<string, number> =
@@ -45,6 +47,7 @@ export async function startGlobalEventListener(api: OpencodeClient, mux: Adapter
     sessionCache,
     sessionToAdapterKey,
     chatAgent,
+    chatModel,
     chatSessionList,
     chatAgentList,
     chatMaxFileSizeMb,
@@ -62,6 +65,7 @@ export function stopGlobalEventListener() {
     sessionCache,
     sessionToAdapterKey,
     chatAgent,
+    chatModel,
     chatSessionList,
     chatAgentList,
     chatMaxFileSizeMb,
@@ -75,6 +79,7 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
     sessionToAdapterKey,
     sessionToCtx,
     chatAgent,
+    chatModel,
     chatSessionList,
     chatAgentList,
     chatMaxFileSizeMb,

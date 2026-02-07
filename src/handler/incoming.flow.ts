@@ -7,6 +7,7 @@ import { handleSlashCommand } from './command';
 import type { AdapterMux } from './mux';
 
 type SessionContext = { chatId: string; senderId: string };
+type SelectedModel = { providerID: string; modelID: string; name?: string };
 type NamedRecord = { id?: string; name?: string; title?: string; description?: string };
 type DataEnvelope = { data?: unknown };
 
@@ -43,6 +44,7 @@ export type IncomingFlowDeps = {
   sessionToAdapterKey: Map<string, string>;
   sessionToCtx: Map<string, SessionContext>;
   chatAgent: Map<string, string>;
+  chatModel: Map<string, SelectedModel>;
   chatSessionList: Map<string, Array<{ id: string; title: string }>>;
   chatAgentList: Map<string, Array<{ id: string; name: string }>>;
   chatMaxFileSizeMb: Map<string, number>;
@@ -78,12 +80,23 @@ export const createIncomingHandlerWithDeps = (
         ? 'sessions'
         : rawCommand === 'summarize'
           ? 'compact'
+          : rawCommand === 'model'
+            ? 'models'
+          : rawCommand === 'restart'
+            ? 'restart'
           : rawCommand === 'clear'
             ? 'new'
+          : rawCommand === 'new'
+            ? 'new'
+          : rawCommand === 'reset'
+            ? 'restart'
             : rawCommand;
+    const sessionsArg = slash?.arguments?.trim() || '';
     const targetSessionId =
-      normalizedCommand === 'sessions' && slash?.arguments
-        ? slash.arguments.trim().split(/\s+/)[0]
+      normalizedCommand === 'sessions' &&
+      sessionsArg &&
+      !/^(del|delete|rm|remove)\b/i.test(sessionsArg)
+        ? sessionsArg.split(/\s+/)[0]
         : null;
     const targetAgentArg = slash?.arguments ? slash.arguments.trim() : '';
     const targetAgent = normalizedCommand === 'agent' && targetAgentArg ? targetAgentArg : null;
@@ -113,6 +126,7 @@ export const createIncomingHandlerWithDeps = (
           deps.sessionToAdapterKey.set(sessionId, adapterKey);
           deps.sessionToCtx.set(sessionId, { chatId, senderId });
           deps.chatAgent.delete(cacheKey);
+          deps.chatModel.delete(cacheKey);
         }
         return sessionId;
       };
@@ -168,6 +182,7 @@ export const createIncomingHandlerWithDeps = (
           sessionToAdapterKey: deps.sessionToAdapterKey,
           sessionToCtx: deps.sessionToCtx,
           chatAgent: deps.chatAgent,
+          chatModel: deps.chatModel,
           chatSessionList: deps.chatSessionList,
           chatAgentList: deps.chatAgentList,
           chatMaxFileSizeMb: deps.chatMaxFileSizeMb,
@@ -260,6 +275,7 @@ export const createIncomingHandlerWithDeps = (
       deps.sessionToCtx.set(sessionId, { chatId, senderId });
 
       const agent = deps.chatAgent.get(cacheKey);
+      const model = deps.chatModel.get(cacheKey);
       const partList: Array<TextPartInput | FilePartInput> = [];
       if (text && text.trim()) {
         partList.push({ type: 'text', text });
@@ -278,7 +294,11 @@ export const createIncomingHandlerWithDeps = (
       );
       await api.session.prompt({
         path: { id: sessionId },
-        body: { parts: partList, ...(agent ? { agent } : {}) },
+        body: {
+          parts: partList,
+          ...(agent ? { agent } : {}),
+          ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
+        },
       });
 
       console.log(`[Bridge] [${adapterKey}] [Session: ${sessionId}] 🚀 Prompt Sent.`);

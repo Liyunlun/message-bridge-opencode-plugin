@@ -9,6 +9,10 @@ function hasSubstantiveAnswerText(buf: ExecutionMessageBuffer): boolean {
   return (buf?.text || '').trim().length > 1;
 }
 
+function hasExecutionLikeContent(buf: ExecutionMessageBuffer): boolean {
+  return !!(buf?.tools?.size || 0) || !!(buf?.reasoning || '').trim();
+}
+
 function isToolCallPhase(buf: ExecutionMessageBuffer): boolean {
   const note = String(buf?.statusNote || '').toLowerCase();
   return note.includes('tool-calls') || note.includes('tool calls');
@@ -20,10 +24,9 @@ export function shouldCarryPlatformMessageAcrossAssistantMessages(
   if (!prevBuf?.platformMsgId) return false;
   if (prevBuf?.status === 'error' || prevBuf?.status === 'aborted') return false;
   if (isToolCallPhase(prevBuf)) return true;
-  return (
-    !hasSubstantiveAnswerText(prevBuf) &&
-    (!!(prevBuf?.tools?.size || 0) || !!(prevBuf?.reasoning || '').trim())
-  );
+  if (!hasExecutionLikeContent(prevBuf)) return false;
+  // Merge only while execution is ongoing and no substantive answer is formed yet.
+  return !hasSubstantiveAnswerText(prevBuf);
 }
 
 export function carryPlatformMessage(prevBuf: ExecutionMessageBuffer, nextBuf: ExecutionMessageBuffer) {
@@ -50,8 +53,9 @@ export function splitFinalAnswerFromExecution(buffer: ExecutionMessageBuffer) {
   buffer.platformMsgId = null;
   buffer.lastDisplayHash = '';
   buffer.__executionCarried = false;
-  // Final answer should be a clean message, not mixed with historical tool steps.
+  // Final answer should be a clean message, not mixed with historical execution context.
   buffer.tools = new Map();
+  buffer.reasoning = '';
 }
 
 export function buildFinalizedExecutionContent(buffer: ExecutionMessageBuffer): string {
@@ -68,7 +72,7 @@ export function buildPlatformDisplay(buffer: ExecutionMessageBuffer): string {
   // Avoid leaking partial conclusion into execution cards.
   if (
     buffer?.__executionCarried &&
-    (buffer?.tools?.size || 0) > 0 &&
+    hasExecutionLikeContent(buffer) &&
     hasSubstantiveAnswerText(buffer)
   ) {
     return buildDisplayContent({ ...buffer, text: '' });

@@ -4,6 +4,12 @@ export const AGENT_LARK = 'lark-bridge';
 export const AGENT_IMESSAGE = 'imessage-bridge';
 export const AGENT_TELEGRAM = 'telegram-bridge';
 
+export const BRIDGE_AGENT_IDS = [AGENT_LARK, AGENT_IMESSAGE, AGENT_TELEGRAM] as const;
+
+export function isBridgeAgentId(value: string): boolean {
+  return BRIDGE_AGENT_IDS.includes(value as (typeof BRIDGE_AGENT_IDS)[number]);
+}
+
 export const LOADING_EMOJI = 'Typing';
 
 export const UPDATE_INTERVAL = 900;
