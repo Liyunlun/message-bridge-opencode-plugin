@@ -23,13 +23,18 @@
   * 支持 '/' 命令
   * 支持 **Webhook** 与 **WebSocket** 两种模式
   * 适配 OpenCode 插件体系
+* **Telegram（Bot API / 轮询 + Webhook）**
+
+  * 支持接收文本消息
+  * 支持常见媒体消息（图片/文件/视频/音频/语音/贴纸/动图）
+  * 支持流式回复发送与编辑
+  * 支持桥接层 slash 命令流程
 
 ### 🚧 开发中（优先级排序）
 
 * **iMessage（下一优先目标）**
 * 其他计划中的平台：
 
-  * Telegram
   * QQ
   * WhatsApp（取决于 API 可用性）
 
@@ -97,6 +102,8 @@ UI 相关命令（主题/编辑器/退出等）**不适合聊天场景**，因�
 * `/sessions` → 列出会话（回复 `/sessions <id>` 切换）
 * `/maxFileSize <xmb>` → 设置上传文件大小限制（默认 10MB）
 * `/maxFileRetry <n>` → 设置资源下载重试次数（默认 3）
+* `/savefile` → 进入“直接保存上传文件”模式（不经过大模型）
+* `/sendfile <path>` → 按本地路径强制回传文件
 * `/share` / `/unshare`
 * `/compact`（别名 `/summarize`）
 * `/init`
@@ -126,6 +133,35 @@ UI 相关命令（主题/编辑器/退出等）**不适合聊天场景**，因�
 
 如果你的 OpenCode 环境提供了其它 slash 命令，且未在上面专门适配，则仍会走 `session.command` 透传。
 
+### 本地文件直传/直存（不走 LLM）
+
+插件提供两条直接文件能力：
+
+* `/sendfile <path>`：根据本地路径直接通过 Bot 回传文件。
+* `/savefile`：进入上传等待态；你下一条上传的文件会直接保存到本地并返回路径。
+
+以上流程都由桥接层直接处理，不经过大模型。
+
+---
+
+## 🧾 日志配置
+
+桥接日志已统一收口到同一套 logger，并默认写入文件。
+
+可用环境变量：
+
+* `BRIDGE_LOG_FILE`：自定义日志文件路径（默认：`logs/bridge.log`）
+* `BRIDGE_LOG_STDOUT`：是否输出到终端（默认 `true`）
+* `BRIDGE_DEBUG`：是否开启 debug 级别日志（默认 `false`）
+
+示例：
+
+```bash
+BRIDGE_DEBUG=true BRIDGE_LOG_FILE=/tmp/bridge.log opencode web
+```
+
+也可以通过 `/status` 查看当前日志路径（`logFile` 字段）。
+
 ---
 
 ## 📦 安装
@@ -149,7 +185,19 @@ npm install message-bridge-opencode-plugin
 
 - 飞书配置 
 	
-	 [快速开始 🔗 ](https://github.com/YuanG1944/message-bridge-opencode-plugin/tree/main/config-guide/lark/GUIDE.zh.md)
+	[快速开始 🔗 ](https://github.com/YuanG1944/message-bridge-opencode-plugin/tree/main/config-guide/lark/GUIDE.zh.md)
+
+- Telegram 配置
+
+  [快速开始 🔗 ](https://github.com/YuanG1944/message-bridge-opencode-plugin/tree/main/config-guide/telegram/GUIDE.zh.md)
+
+可选文件桥配置（`agent.message-bridge.options`）：
+
+* `auto_send_local_files`（`"true"` / `"false"`，默认 `false`）
+* `auto_send_local_files_max_mb`（默认 `20`）
+* `auto_send_local_files_allow_absolute`（`"true"` / `"false"`，默认 `false`）
+* `file_store_dir`（上传文件本地保存目录；支持相对路径/绝对路径/`file://`；默认 `bridge_files`）
+* `webhook_listen_port`（Telegram webhook 本地监听端口，可选；回退顺序：callback_url 端口 -> `18080`）
 
 ## 🚧 当前必须使用开发模式
 
@@ -176,7 +224,7 @@ bun install
 
 * [x] 飞书 / Lark（已完成，稳定）
 * [ ] iMessage（优先实现）
-* [ ] Telegram
+* [x] Telegram（Bot API / 轮询 + Webhook）
 * [ ] Slack
 * [ ] Discord
 * [ ] 统一消息回复 / 会话抽象

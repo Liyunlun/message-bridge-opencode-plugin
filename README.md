@@ -26,13 +26,18 @@ After validation and real-world usage, it has evolved into a **general-purpose m
   * Supports **Webhook** and **WebSocket** modes
   * Stable message receiving & forwarding
   * Fully compatible with OpenCode plugin system
+* **Telegram (Bot API / Polling + Webhook)**
+
+  * Supports incoming text messages
+  * Supports common media receive (photo/document/video/audio/voice/sticker/animation)
+  * Supports streamed reply send/edit
+  * Supports slash-command flow in bridge
 
 ### 🚧 Under Active Development
 
 * **iMessage** (Next priority)
 * Other IM platforms (planned):
 
-  * Telegram
   * Slack
   * Discord
   * WhatsApp (subject to API availability)
@@ -81,6 +86,7 @@ From the official TUI docs, the built-in commands include:
 * `/init`
 * `/models`
 * `/new` (alias: `/clear`)
+* `/reset` (alias: `/restart`)
 * `/redo`
 * `/sessions` (aliases: `/resume`, `/continue`)
 * `/share`
@@ -88,23 +94,32 @@ From the official TUI docs, the built-in commands include:
 * `/thinking`
 * `/undo`
 * `/unshare`
+* `/status`
 * `/maxFileSize`
 * `/maxFileRetry`
+* `/agent`
 
 ### Bridge-Handled Commands
 
 These are implemented directly against OpenCode APIs:
 
 * `/help` → list custom commands
-* `/models` → list providers and models
+* `/models` → list providers and models (`/models <providerIndex.modelIndex>` to switch)
 * `/new` → create and bind to a new session
-* `/sessions` → list sessions (reply with `/sessions <id>` to bind)
+* `/reset` / `/restart` → reset bridge runtime state and create a new session
+* `/status` → show runtime status (session / agent / model / pid / uptime)
+* `/sessions` → list sessions (reply with `/sessions <id>` or `/sessions <index>` to bind)
+* `/sessions delete 1,2,3` → batch delete sessions by index/id
+* `/sessions delete all` → delete all sessions except current one
 * `/maxFileSize <xmb>` → set upload file size limit (default 10MB)
 * `/maxFileRetry <n>` → set resource download retry count (default 3)
+* `/savefile` → ask user to upload file and save directly to local path (without LLM)
+* `/sendfile <path>` → force-send a local file back via bot
 * `/share` / `/unshare`
 * `/compact` (alias `/summarize`)
 * `/init`
-* `/agent <name>` → bind agent for future prompts
+* `/agent` → list available agents
+* `/agent <index|name>` → bind agent for future prompts
 
 ### UI-Only Commands (Not Supported in Chat)
 
@@ -126,9 +141,39 @@ Custom commands are supported via:
 ### Session / Agent Switching
 
 Session switching via `/sessions` is fully supported. The list is returned to the chat, and you can reply with `/sessions <id>` **or** `/sessions <index>` to bind this chat to the chosen session.
+Session batch deletion is supported via `/sessions delete ...`, and `/sessions delete all` keeps the current active session.
 File upload size limit can be adjusted per chat with `/maxFileSize <xmb>` (default 10MB).
 
 If your OpenCode setup provides additional slash commands, they will still be forwarded via `session.command` unless explicitly handled above.
+
+### Local File Return / Save (No-LLM path)
+
+This bridge supports two direct file operations:
+
+* `/sendfile <path>`: force-send a local file by path.
+* `/savefile`: enter upload mode; the next uploaded file is saved to local disk and the saved path is returned.
+
+These flows bypass LLM reasoning and are handled directly by bridge adapters.
+
+---
+
+## 🧾 Logging
+
+The bridge now uses a unified logger and writes logs to file by default.
+
+Environment variables:
+
+* `BRIDGE_LOG_FILE` - custom log file path (default: `logs/bridge.log`)
+* `BRIDGE_LOG_STDOUT` - enable/disable terminal log output (`true` by default)
+* `BRIDGE_DEBUG` - enable debug-level logs (`false` by default)
+
+Example:
+
+```bash
+BRIDGE_DEBUG=true BRIDGE_LOG_FILE=/tmp/bridge.log opencode web
+```
+
+You can also check the current log path via `/status` (`logFile` field).
 
 ---
 
@@ -153,9 +198,21 @@ npm install message-bridge-opencode-plugin
 > It is strongly recommended to use **string values** for all config fields to avoid parsing issues.
 
 ### Feishu / Lark (Webhook mode)
-	 [Quicj Start 🔗 ](https://github.com/YuanG1944/message-bridge-opencode-plugin/tree/main/config-guide/lark/GUIDE.md)
+[Quicj Start 🔗 ](https://github.com/YuanG1944/message-bridge-opencode-plugin/tree/main/config-guide/lark/GUIDE.md)
 
----
+### Telegram (Bot API - Polling)
+
+[Quick Start 🔗](https://github.com/YuanG1944/message-bridge-opencode-plugin/tree/main/config-guide/telegram/GUIDE.md)
+
+### Optional file-bridge options
+
+You can configure local file return behavior in `agent.message-bridge.options`:
+
+* `auto_send_local_files` (`"true"` / `"false"`, default `false`)
+* `auto_send_local_files_max_mb` (default `20`)
+* `auto_send_local_files_allow_absolute` (`"true"` / `"false"`, default `false`)
+* `file_store_dir` (local directory to save inbound uploaded files; supports relative/absolute/`file://` paths; default: `bridge_files`)
+* `webhook_listen_port` (Telegram webhook local listen port, optional; fallback: callback_url port -> `18080`)
 
 ## 🚧 Development Mode Usage (Required for now)
 
@@ -215,7 +272,7 @@ pwd
 
 * [x] Feishu / Lark (Production ready)
 * [ ] iMessage (Next milestone)
-* [ ] Telegram
+* [x] Telegram (Bot API / Polling + Webhook)
 * [ ] Slack
 * [ ] Discord
 * [ ] Unified message reply & threading abstraction

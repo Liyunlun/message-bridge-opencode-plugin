@@ -1,5 +1,6 @@
 ## 🚀 快速开始 --- 飞书
 
+
 [安装教程视频](https://www.bilibili.com/video/BV1jcFqz7EFW/?spm_id_from=333.1391.0.0&vd_source=eb4b8afe50082dead4e939bc4c55440b)
 录的不好请轻喷😅
 

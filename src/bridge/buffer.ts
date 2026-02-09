@@ -1,12 +1,12 @@
 // src/bridge/buffer.ts
-import type { ToolPart, ToolState } from '@opencode-ai/sdk';
+import type { FilePart, ToolPart, ToolState } from '@opencode-ai/sdk';
 import {
   SAFE_MAX_REASONING,
   SAFE_MAX_TEXT,
   SAFE_MAX_TOOL_INPUT,
   SAFE_MAX_TOOL_OUTPUT,
-  UPDATE_INTERVAL,
 } from '../constants';
+import { getUpdateIntervalByAdapter } from '../utils';
 import { Part } from '@opencode-ai/sdk';
 
 export type BufferStatus = 'streaming' | 'done' | 'aborted' | 'error';
@@ -31,6 +31,8 @@ export interface MessageBuffer {
   text: string; // 原始 answer text
   tools: Map<string, ToolView>; // callID -> tool
   files: Array<{ filename?: string; mime: string; url: string }>;
+  selectedAgent?: string;
+  selectedModel?: { providerID: string; modelID: string; name?: string };
   lastUpdateTime: number;
   lastDisplayHash: string;
   status: BufferStatus;
@@ -173,6 +175,15 @@ export function buildDisplayContent(buffer: MessageBuffer): string {
   // Status（纯字段，无 label/emoji）
   out.push('## Status');
   out.push(`${buffer.status}${buffer.statusNote ? `: ${buffer.statusNote}` : ''}`);
+  out.push(buffer.selectedAgent || 'default');
+  if (buffer.selectedModel) {
+    const model = buffer.selectedModel;
+    const rawModelLabel = model.name || model.modelID;
+    const modelLabel = rawModelLabel.includes('/')
+      ? rawModelLabel.split('/').filter(Boolean).pop() || rawModelLabel
+      : rawModelLabel;
+    out.push(modelLabel);
+  }
 
   return out.join('\n');
 }
@@ -243,11 +254,9 @@ export function applyPartToBuffer(buffer: MessageBuffer, part: Part, delta?: str
   }
 
   if (part.type === 'file') {
-    const filePart = part as any;
+    const filePart = part as FilePart;
     if (
-      !buffer.files.some(
-        f => f.url === filePart.url && f.filename === filePart.filename
-      )
+      !buffer.files.some(f => f.url === filePart.url && f.filename === filePart.filename)
     ) {
       buffer.files.push({
         filename: filePart.filename,
@@ -261,8 +270,9 @@ export function applyPartToBuffer(buffer: MessageBuffer, part: Part, delta?: str
   // 其它 part：暂不处理（renderer/后续需要再加）
 }
 
-export function shouldFlushNow(buffer: MessageBuffer): boolean {
+export function shouldFlushNow(buffer: MessageBuffer, adapterKey?: string): boolean {
   const now = Date.now();
   const timeSinceLastUpdate = now - buffer.lastUpdateTime;
-  return !buffer.platformMsgId || timeSinceLastUpdate > UPDATE_INTERVAL;
+  const interval = getUpdateIntervalByAdapter(adapterKey);
+  return !buffer.platformMsgId || timeSinceLastUpdate > interval;
 }

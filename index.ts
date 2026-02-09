@@ -1,114 +1,122 @@
 // index.ts
 import type { Plugin } from '@opencode-ai/plugin';
-import type { Config } from '@opencode-ai/sdk';
 
-import { globalState } from './src/utils';
+import { globalState, isEnabled, runtimeInstanceId } from './src/utils';
 import { AGENT_LARK, AGENT_IMESSAGE, AGENT_TELEGRAM } from './src/constants';
+import { bridgeLogger, getBridgeLogFilePath } from './src/logger';
 
 import { AdapterMux } from './src/handler/mux';
 import { startGlobalEventListener, createIncomingHandler } from './src/handler';
+import { setBridgeFileStoreDir } from './src/bridge/file.store';
 
 import { FeishuAdapter } from './src/feishu/feishu.adapter';
-import type { FeishuConfig, BridgeAdapter } from './src/types';
+import type { BridgeAdapter } from './src/types';
+import { TelegramAdapter } from './src/telegram/telegram.adapter';
 
-// isEnabled
-function isEnabled(cfg: Config, key: string): boolean {
-  const node = cfg?.agent?.[key];
-  if (!node) return false;
-  if (node.disable === true) return false;
-  return true;
-}
-
-function parseFeishuConfig(cfg: Config): FeishuConfig {
-  const node = cfg?.agent?.[AGENT_LARK];
-  const options = (node?.options || {}) as Record<string, any>;
-
-  const app_id = options.app_id;
-  const app_secret = options.app_secret;
-  const mode = (options.mode || 'ws') as 'ws' | 'webhook';
-  const callbackUrlRaw = options.callback_url;
-  const callbackUrl =
-    typeof callbackUrlRaw === 'string' && callbackUrlRaw.length > 0
-      ? callbackUrlRaw.startsWith('http')
-        ? callbackUrlRaw
-        : `http://${callbackUrlRaw}`
-      : undefined;
-
-  if (mode === 'webhook' && !callbackUrl) {
-    console.error(`[Plugin] Missing callback_url for ${AGENT_LARK} in webhook mode`);
-  }
-
-  if (!app_id || !app_secret) {
-    throw new Error(`[Plugin] Missing options for ${AGENT_LARK}: app_id/app_secret`);
-  }
-
-  return {
-    app_id,
-    app_secret,
-    mode,
-    callback_url: callbackUrl,
-    encrypt_key: options.encrypt_key,
-  };
-}
+import { parseFeishuConfig } from './index.feishu';
+import { parseTelegramConfig } from './index.telegram';
 
 export const BridgePlugin: Plugin = async ctx => {
   const { client } = ctx;
-  console.log('[Plugin] BridgePlugin entry initializing...');
+  bridgeLogger.info(
+    `[Plugin] bridge entry initializing logFile=${getBridgeLogFilePath()} pid=${process.pid} instance=${runtimeInstanceId}`,
+  );
 
   const bootstrap = async () => {
     try {
       const raw = await client.config.get();
-      const cfg = (raw?.data || raw || {}) as Config;
+      const cfg = raw?.data;
 
       // mux 单例
       const mux: AdapterMux = globalState.__bridge_mux || new AdapterMux();
       globalState.__bridge_mux = mux;
+      const adapterInstances: Map<string, BridgeAdapter> =
+        globalState.__bridge_adapter_instances || new Map<string, BridgeAdapter>();
+      const startedAdapters: Set<string> =
+        globalState.__bridge_started_adapters || new Set<string>();
+      const startingAdapters: Set<string> =
+        globalState.__bridge_starting_adapters || new Set<string>();
+      globalState.__bridge_adapter_instances = adapterInstances;
+      globalState.__bridge_started_adapters = startedAdapters;
+      globalState.__bridge_starting_adapters = startingAdapters;
 
       // 允许多个 adapter 同时启用
-      const adaptersToStart: Array<{ key: string; adapter: BridgeAdapter }> = [];
+      const adaptersToStart: Array<{ key: string; create: () => BridgeAdapter }> = [];
+      const storeDirCandidates: string[] = [];
 
       if (isEnabled(cfg, AGENT_LARK)) {
         const feishuCfg = parseFeishuConfig(cfg);
-        adaptersToStart.push({ key: AGENT_LARK, adapter: new FeishuAdapter(feishuCfg) });
-      }
-
-      if (isEnabled(cfg, AGENT_IMESSAGE)) {
-        console.log('[Plugin] imessage-bridge enabled (not implemented yet).');
-        // TODO: mux.register(AGENT_IMESSAGE, new IMessageAdapter(...))
+        if (feishuCfg.file_store_dir) storeDirCandidates.push(feishuCfg.file_store_dir);
+        adaptersToStart.push({ key: AGENT_LARK, create: () => new FeishuAdapter(feishuCfg) });
       }
 
       if (isEnabled(cfg, AGENT_TELEGRAM)) {
-        console.log('[Plugin] telegram-bridge enabled (not implemented yet).');
-        // TODO: mux.register(AGENT_TELEGRAM, new TelegramAdapter(...))
+        const telegramCfg = parseTelegramConfig(cfg);
+        if (telegramCfg.file_store_dir) storeDirCandidates.push(telegramCfg.file_store_dir);
+        adaptersToStart.push({
+          key: AGENT_TELEGRAM,
+          create: () => new TelegramAdapter(telegramCfg),
+        });
+      }
+
+      if (isEnabled(cfg, AGENT_IMESSAGE)) {
+        bridgeLogger.info('[Plugin] imessage-bridge enabled (not implemented yet).');
+        // TODO: mux.register(AGENT_IMESSAGE, new IMessageAdapter(...))
       }
 
       if (adaptersToStart.length === 0) {
-        console.log('[Plugin] No bridge enabled.');
+        bridgeLogger.info('[Plugin] no bridge enabled');
         return;
       }
 
+      const uniqueStoreDirs = Array.from(new Set(storeDirCandidates.map(v => v.trim()))).filter(
+        Boolean,
+      );
+      if (uniqueStoreDirs.length > 1) {
+        bridgeLogger.warn(
+          `[Plugin] multiple file_store_dir configured, using first: ${uniqueStoreDirs.join(', ')}`,
+        );
+      }
+      setBridgeFileStoreDir(uniqueStoreDirs[0]);
+
       // 注册 + start（incoming）
-      for (const { key, adapter } of adaptersToStart) {
+      for (const { key, create } of adaptersToStart) {
+        const adapter = adapterInstances.get(key) || create();
+        adapterInstances.set(key, adapter);
         mux.register(key, adapter);
+        if (startedAdapters.has(key)) {
+          bridgeLogger.info(`[Plugin] adapter already started, skip start adapter=${key}`);
+          continue;
+        }
+        if (startingAdapters.has(key)) {
+          bridgeLogger.info(`[Plugin] adapter is starting, skip duplicate start adapter=${key}`);
+          continue;
+        }
+        startingAdapters.add(key);
         const incoming = createIncomingHandler(client, mux, key);
-        await adapter.start(incoming);
-        console.log(`[Plugin] ✅ Started adapter: ${key}`);
+        try {
+          await adapter.start(incoming);
+          startedAdapters.add(key);
+          bridgeLogger.info(`[Plugin] started adapter=${key}`);
+        } finally {
+          startingAdapters.delete(key);
+        }
       }
 
       // 全局 listener 只启动一次（mux）
       if (!globalState.__bridge_listener_started) {
         globalState.__bridge_listener_started = true;
         startGlobalEventListener(client, mux).catch(err => {
-          console.error('[Plugin] ❌ startGlobalEventListener failed:', err);
+          bridgeLogger.error('[Plugin] startGlobalEventListener failed', err);
           globalState.__bridge_listener_started = false;
         });
       } else {
-        console.log('[Plugin] Global listener already started.');
+        bridgeLogger.info('[Plugin] global listener already started');
       }
 
-      console.log('[Plugin] ✅ BridgePlugin ready.');
+      bridgeLogger.info('[Plugin] BridgePlugin ready');
     } catch (e) {
-      console.error('[Plugin] Bootstrap error:', e);
+      bridgeLogger.error('[Plugin] bootstrap error', e);
     }
   };
 
