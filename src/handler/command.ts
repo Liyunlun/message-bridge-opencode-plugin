@@ -126,6 +126,8 @@ export type CommandContext = {
   chatAwaitingSaveFile: Map<string, boolean>;
   chatMaxFileSizeMb: Map<string, number>;
   chatMaxFileRetry: Map<string, number>;
+  clearPendingQuestionForChat: (cacheKey: string) => void;
+  clearAllPendingQuestions: () => void;
   ensureSession: () => Promise<string>;
   createNewSession: () => Promise<string | undefined>;
   sendCommandMessage: (content: string) => Promise<void>;
@@ -155,6 +157,8 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     chatAwaitingSaveFile,
     chatMaxFileSizeMb,
     chatMaxFileRetry,
+    clearPendingQuestionForChat,
+    clearAllPendingQuestions,
     ensureSession,
     createNewSession,
     sendCommandMessage,
@@ -502,6 +506,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     sessionToCtx.set(targetId, { chatId: ctx.chatId, senderId: ctx.senderId });
     chatAgent.delete(cacheKey);
     chatModel.delete(cacheKey);
+    clearPendingQuestionForChat(cacheKey);
     await sendCommandMessage(`✅ 已切换到会话: ${targetId}`);
     return true;
   }
@@ -542,6 +547,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   }
 
   if (normalizedCommand === 'new') {
+    clearPendingQuestionForChat(cacheKey);
     const sessionId = await createNewSession();
     if (sessionId) {
       await sendCommandMessage(`✅ 已切换到新会话: ${sessionId}`);
@@ -562,6 +568,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     chatAwaitingSaveFile.clear();
     chatMaxFileSizeMb.clear();
     chatMaxFileRetry.clear();
+    clearAllPendingQuestions();
 
     if (globalState.__bridge_progress_msg_ids) {
       globalState.__bridge_progress_msg_ids.clear();

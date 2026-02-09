@@ -109,3 +109,22 @@
   - `file://` URLs
   - Windows drive paths (`C:\...`)
   - Windows UNC paths (`\\server\share\...`)
+
+---
+
+# Release Note (2026-02-09)
+
+## 🐞 Bugfix: Plan-Mode Question Flow
+
+- Fixed `tool=question` error flow getting stuck in bridge conversations.
+- Added question-proxy handling in bridge runtime:
+  - captures question tool input when tool status is `error`
+  - sends actionable question prompt back to IM chat (Feishu/Telegram)
+  - accepts user reply by index or option text
+  - resumes session with structured answer payload
+- Updated timeout behavior:
+  - no longer auto-continues with defaults
+  - after 15 minutes without reply, pending question is canceled with status notice
+- Added debug logs for real `question` tool payload inspection:
+  - logs `status`, `input`, and `error` (with safe truncation)
+  - logs explicit `payload-parse-failed` when normalization fails

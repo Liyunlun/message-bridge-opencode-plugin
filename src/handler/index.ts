@@ -5,6 +5,7 @@ import { AdapterMux } from './mux';
 import { createIncomingHandlerWithDeps } from './incoming.flow';
 import { startGlobalEventListenerWithDeps, stopGlobalEventListenerWithDeps } from './event.flow';
 import { globalState } from '../utils';
+import type { PendingQuestionState } from './question.proxy';
 
 type SessionContext = { chatId: string; senderId: string };
 type SelectedModel = { providerID: string; modelID: string; name?: string };
@@ -24,6 +25,8 @@ const chatMaxFileSizeMb: Map<string, number> =
   globalState.__bridge_max_file_size || new Map<string, number>();
 const chatMaxFileRetry: Map<string, number> =
   globalState.__bridge_max_file_retry || new Map<string, number>();
+const chatPendingQuestion = new Map<string, PendingQuestionState>();
+const pendingQuestionTimers = new Map<string, NodeJS.Timeout>();
 globalState.__bridge_max_file_size = chatMaxFileSizeMb;
 globalState.__bridge_max_file_retry = chatMaxFileRetry;
 
@@ -36,6 +39,23 @@ function formatUserError(err: unknown): string {
     return '网络异常，资源下载失败，请稍后重试。';
   }
   return msg.split('\n')[0].slice(0, 200);
+}
+
+function clearPendingQuestionForChat(cacheKey: string) {
+  const timer = pendingQuestionTimers.get(cacheKey);
+  if (timer) {
+    clearTimeout(timer);
+    pendingQuestionTimers.delete(cacheKey);
+  }
+  chatPendingQuestion.delete(cacheKey);
+}
+
+function clearAllPendingQuestions() {
+  for (const timer of pendingQuestionTimers.values()) {
+    clearTimeout(timer);
+  }
+  pendingQuestionTimers.clear();
+  chatPendingQuestion.clear();
 }
 
 export async function startGlobalEventListener(api: OpencodeClient, mux: AdapterMux) {
@@ -54,6 +74,8 @@ export async function startGlobalEventListener(api: OpencodeClient, mux: Adapter
     chatAwaitingSaveFile,
     chatMaxFileSizeMb,
     chatMaxFileRetry,
+    chatPendingQuestion,
+    pendingQuestionTimers,
   });
 }
 
@@ -73,6 +95,8 @@ export function stopGlobalEventListener() {
     chatAwaitingSaveFile,
     chatMaxFileSizeMb,
     chatMaxFileRetry,
+    chatPendingQuestion,
+    pendingQuestionTimers,
   });
 }
 
@@ -88,5 +112,8 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
     chatAwaitingSaveFile,
     chatMaxFileSizeMb,
     chatMaxFileRetry,
+    chatPendingQuestion,
+    clearPendingQuestionForChat,
+    clearAllPendingQuestions,
     formatUserError,
   });

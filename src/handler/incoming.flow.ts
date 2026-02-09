@@ -6,6 +6,13 @@ import { ERROR_HEADER, parseSlashCommand, globalState } from '../utils';
 import { bridgeLogger } from '../logger';
 import { handleSlashCommand } from './command';
 import type { AdapterMux } from './mux';
+import {
+  buildResumePrompt,
+  parseUserReply,
+  renderAnswerSummary,
+  renderReplyHint,
+} from './question.proxy';
+import type { PendingQuestionState } from './question.proxy';
 
 type SessionContext = { chatId: string; senderId: string };
 type SelectedModel = { providerID: string; modelID: string; name?: string };
@@ -68,6 +75,9 @@ export type IncomingFlowDeps = {
   chatAwaitingSaveFile: Map<string, boolean>;
   chatMaxFileSizeMb: Map<string, number>;
   chatMaxFileRetry: Map<string, number>;
+  chatPendingQuestion: Map<string, PendingQuestionState>;
+  clearPendingQuestionForChat: (cacheKey: string) => void;
+  clearAllPendingQuestions: () => void;
   formatUserError: (err: unknown) => string;
 };
 
@@ -92,6 +102,7 @@ export const createIncomingHandlerWithDeps = (
     );
 
     const slash = parseSlashCommand(text);
+    const hasText = Boolean(text && text.trim());
     const cacheKey = `${adapterKey}:${chatId}`;
     const rawCommand = slash?.command?.toLowerCase();
     const normalizedCommand = normalizeSlashCommand(rawCommand);
@@ -203,6 +214,8 @@ export const createIncomingHandlerWithDeps = (
           chatAwaitingSaveFile: deps.chatAwaitingSaveFile,
           chatMaxFileSizeMb: deps.chatMaxFileSizeMb,
           chatMaxFileRetry: deps.chatMaxFileRetry,
+          clearPendingQuestionForChat: deps.clearPendingQuestionForChat,
+          clearAllPendingQuestions: deps.clearAllPendingQuestions,
           ensureSession,
           createNewSession,
           sendCommandMessage,
@@ -214,8 +227,40 @@ export const createIncomingHandlerWithDeps = (
         if (handled) return;
       }
 
+      const pendingQuestion = deps.chatPendingQuestion.get(cacheKey);
+      if (pendingQuestion && !slash) {
+        if (!hasText) {
+          await adapter.sendMessage(chatId, renderReplyHint(pendingQuestion));
+          return;
+        }
+
+        const resolved = parseUserReply(text, pendingQuestion);
+        if (!resolved.ok) {
+          await adapter.sendMessage(chatId, renderReplyHint(pendingQuestion));
+          return;
+        }
+
+        deps.clearPendingQuestionForChat(cacheKey);
+        await adapter.sendMessage(chatId, renderAnswerSummary(pendingQuestion, resolved.answers, 'user'));
+
+        const sessionId = await ensureSession();
+        deps.sessionToAdapterKey.set(sessionId, adapterKey);
+        deps.sessionToCtx.set(sessionId, { chatId, senderId });
+
+        const agent = deps.chatAgent.get(cacheKey);
+        const model = deps.chatModel.get(cacheKey);
+        await api.session.prompt({
+          path: { id: sessionId },
+          body: {
+            parts: [{ type: 'text', text: buildResumePrompt(pendingQuestion, resolved.answers, 'user') }],
+            ...(agent ? { agent } : {}),
+            ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
+          },
+        });
+        return;
+      }
+
       const fileParts = (parts || []).filter(isFilePartInput);
-      const hasText = Boolean(text && text.trim());
 
       if (fileParts.length > 0) {
         const isSaveFileMode = deps.chatAwaitingSaveFile.get(cacheKey) === true;

@@ -6,6 +6,7 @@ import type {
   EventSessionIdle,
   OpencodeClient,
 } from '@opencode-ai/sdk';
+import type { ToolPart } from '@opencode-ai/sdk';
 import type { BridgeAdapter } from '../types';
 import type { AdapterMux } from './mux';
 import { bridgeLogger } from '../logger';
@@ -31,12 +32,20 @@ import {
   shouldSplitOutFinalAnswer,
   splitFinalAnswerFromExecution,
 } from './execution.flow';
+import {
+  extractQuestionPayload,
+  isQuestionToolPart,
+  QUESTION_TIMEOUT_MS,
+  renderQuestionPrompt,
+} from './question.proxy';
+import type { PendingQuestionState, NormalizedQuestionPayload } from './question.proxy';
 
 type SessionContext = { chatId: string; senderId: string };
 type SelectedModel = { providerID: string; modelID: string; name?: string };
 type ListenerState = { isListenerStarted: boolean; shouldStopListener: boolean };
 type EventWithType = { type: string; properties?: unknown };
 type EventMessageBuffer = MessageBuffer & { __executionCarried?: boolean };
+const QUESTION_DEBUG_MAX_LEN = 4000;
 
 export type EventFlowDeps = {
   listenerState: ListenerState;
@@ -53,7 +62,109 @@ export type EventFlowDeps = {
   chatAwaitingSaveFile: Map<string, boolean>;
   chatMaxFileSizeMb: Map<string, number>;
   chatMaxFileRetry: Map<string, number>;
+  chatPendingQuestion: Map<string, PendingQuestionState>;
+  pendingQuestionTimers: Map<string, NodeJS.Timeout>;
 };
+
+function clearPendingQuestionForChat(deps: EventFlowDeps, cacheKey: string) {
+  const timer = deps.pendingQuestionTimers.get(cacheKey);
+  if (timer) {
+    clearTimeout(timer);
+    deps.pendingQuestionTimers.delete(cacheKey);
+  }
+  deps.chatPendingQuestion.delete(cacheKey);
+}
+
+function clearAllPendingQuestions(deps: EventFlowDeps) {
+  for (const timer of deps.pendingQuestionTimers.values()) {
+    clearTimeout(timer);
+  }
+  deps.pendingQuestionTimers.clear();
+  deps.chatPendingQuestion.clear();
+}
+
+function getCacheKeyBySession(
+  sessionId: string,
+  deps: EventFlowDeps,
+): { cacheKey: string; adapterKey: string; chatId: string } | null {
+  const ctx = deps.sessionToCtx.get(sessionId);
+  const adapterKey = deps.sessionToAdapterKey.get(sessionId);
+  if (!ctx || !adapterKey) return null;
+  return {
+    cacheKey: `${adapterKey}:${ctx.chatId}`,
+    adapterKey,
+    chatId: ctx.chatId,
+  };
+}
+
+function clipDebugText(value: string, max = QUESTION_DEBUG_MAX_LEN): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max)}...<truncated>`;
+}
+
+async function captureQuestionProxyIfNeeded(params: {
+  part: ToolPart;
+  sessionId: string;
+  messageId: string;
+  api: OpencodeClient;
+  mux: AdapterMux;
+  deps: EventFlowDeps;
+}): Promise<boolean> {
+  const { part, sessionId, messageId, api, mux, deps } = params;
+  if (!isQuestionToolPart(part)) return false;
+
+  const payloadMaybe = extractQuestionPayload(part?.state?.input);
+  if (payloadMaybe === null) return false;
+  const payload: NormalizedQuestionPayload = payloadMaybe;
+
+  const sessionCtx = getCacheKeyBySession(sessionId, deps);
+
+  if (!sessionCtx) return false;
+
+  const { cacheKey, adapterKey, chatId } = sessionCtx;
+  const callID = part.callID || `question-${messageId}`;
+  const existing = deps.chatPendingQuestion.get(cacheKey);
+  if (existing && existing.callID === callID && existing.messageId === messageId) {
+    return true;
+  }
+
+  clearPendingQuestionForChat(deps, cacheKey);
+
+  const pending: PendingQuestionState = {
+    key: cacheKey,
+    adapterKey,
+    chatId,
+    sessionId,
+    messageId,
+    callID,
+    payload,
+    createdAt: Date.now(),
+    dueAt: Date.now() + QUESTION_TIMEOUT_MS,
+  };
+
+  deps.chatPendingQuestion.set(cacheKey, pending);
+
+  const adapter = mux.get(adapterKey);
+  if (adapter) {
+    await adapter.sendMessage(chatId, renderQuestionPrompt(pending)).catch(() => {});
+  }
+
+  const timer = setTimeout(async () => {
+    const current = deps.chatPendingQuestion.get(cacheKey);
+    if (!current || current.callID !== callID || current.messageId !== messageId) return;
+
+    clearPendingQuestionForChat(deps, cacheKey);
+    const currentAdapter = mux.get(current.adapterKey);
+    if (currentAdapter) {
+      await currentAdapter
+        .sendMessage(current.chatId, '## Status\n⏰ 超时，本轮提问已取消。请重新发起问题。')
+        .catch(() => {});
+    }
+  }, QUESTION_TIMEOUT_MS);
+
+  deps.pendingQuestionTimers.set(cacheKey, timer);
+  return true;
+}
 
 function isAbortedError(err: unknown): boolean {
   return (
@@ -145,6 +256,15 @@ async function handleMessageUpdatedEvent(
   }
 
   if (info.error) {
+    const cache = getCacheKeyBySession(sid, deps);
+    const pending = cache ? deps.chatPendingQuestion.get(cache.cacheKey) : undefined;
+
+    if (pending && pending.messageId === mid) {
+      markStatus(deps.msgBuffers, mid, 'done', 'awaiting-user-reply');
+      await flushMessage(adapter, ctx.chatId, mid, deps.msgBuffers, true);
+      return;
+    }
+
     if (isAbortedError(info.error)) {
       markStatus(
         deps.msgBuffers,
@@ -181,6 +301,7 @@ async function handleMessageUpdatedEvent(
 
 async function handleMessagePartUpdatedEvent(
   event: EventMessagePartUpdated,
+  api: OpencodeClient,
   mux: AdapterMux,
   deps: EventFlowDeps,
 ) {
@@ -225,6 +346,21 @@ async function handleMessagePartUpdatedEvent(
     buffer.selectedModel = selectedModel;
   }
   applyPartToBuffer(buffer, part, delta);
+
+  if (
+    part.type === 'tool' &&
+    (await captureQuestionProxyIfNeeded({
+      part: part as ToolPart,
+      sessionId,
+      messageId,
+      api,
+      mux,
+      deps,
+    }))
+  ) {
+    markStatus(deps.msgBuffers, messageId, 'done', 'awaiting-user-reply');
+  }
+
   bridgeLogger.debug(
     `[BridgeFlowDebug] part-applied sid=${sessionId} mid=${messageId} part=${part.type} textLen=${buffer.text.length} reasoningLen=${buffer.reasoning.length} tools=${buffer.tools.size} status=${buffer.status} note="${buffer.statusNote || ''}" hasPlatform=${!!buffer.platformMsgId}`,
   );
@@ -394,7 +530,7 @@ export async function startGlobalEventListenerWithDeps(
           bridgeLogger.debug(
             `[BridgeFlowDebug] part.updated sid=${p.sessionID} mid=${p.messageID} type=${p.type} deltaLen=${(pe.properties.delta || '').length}`,
           );
-          await handleMessagePartUpdatedEvent(event as EventMessagePartUpdated, mux, deps);
+          await handleMessagePartUpdatedEvent(event as EventMessagePartUpdated, api, mux, deps);
           continue;
         }
 
@@ -447,4 +583,6 @@ export function stopGlobalEventListenerWithDeps(deps: EventFlowDeps) {
   deps.chatAwaitingSaveFile.clear();
   deps.chatMaxFileSizeMb.clear();
   deps.chatMaxFileRetry.clear();
+  
+  clearAllPendingQuestions(deps);
 }
