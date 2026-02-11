@@ -1035,7 +1035,9 @@ export class FeishuClient {
           bridgeLogger.info(
             `[Feishu] 📥 ws text chat=${chatId} msg=${messageId} sender=${senderId} len=${text.length}`,
           );
-          await onMessage(chatId, text, messageId, senderId);
+          void onMessage(chatId, text, messageId, senderId).catch(err => {
+            bridgeLogger.error('[Feishu WS] ❌ Handler Error:', err);
+          });
           return;
         }
 
@@ -1044,7 +1046,9 @@ export class FeishuClient {
         bridgeLogger.info(
           `[Feishu] 📥 ws file chat=${chatId} msg=${messageId} sender=${senderId} type=${msgType} name=${part.filename || ''} mime=${part.mime || ''}`,
         );
-        await onMessage(chatId, '', messageId, senderId, [part]);
+        void onMessage(chatId, '', messageId, senderId, [part]).catch(err => {
+          bridgeLogger.error('[Feishu WS] ❌ Handler Error:', err);
+        });
       },
     });
 

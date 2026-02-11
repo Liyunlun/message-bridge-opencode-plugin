@@ -459,7 +459,7 @@ export class TelegramClient {
         }
         for (const update of updates) {
           this.updateOffset = update.update_id + 1;
-          await this.handleUpdate(update, handler);
+          this.dispatchUpdate(update, handler, 'polling');
         }
       } catch (err) {
         const e = asError(err);
@@ -583,9 +583,7 @@ export class TelegramClient {
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ ok: true }));
 
-    await this.handleUpdate(update, handler).catch(err => {
-      bridgeLogger.warn('[Telegram] webhook update failed', asError(err).message);
-    });
+    this.dispatchUpdate(update, handler, 'webhook');
   }
 
   private async readRequestBody(req: http.IncomingMessage, maxBytes: number): Promise<string> {
@@ -693,6 +691,19 @@ export class TelegramClient {
       `[Telegram] incoming update_id=${update.update_id} chat=${chatId} sender=${senderId} msg=${messageId} textLen=${text.length} files=${fileParts.length}`,
     );
     await handler(chatId, text, messageId, senderId, fileParts);
+  }
+
+  private dispatchUpdate(
+    update: TelegramUpdate,
+    handler: IncomingMessageHandler,
+    source: 'polling' | 'webhook',
+  ): void {
+    void this.handleUpdate(update, handler).catch(err => {
+      bridgeLogger.warn(
+        `[Telegram] ${source} update failed update_id=${update.update_id}`,
+        asError(err).message,
+      );
+    });
   }
 
   private async apiCall<T>(
