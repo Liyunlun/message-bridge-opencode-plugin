@@ -40,6 +40,7 @@ import {
   renderQuestionPrompt,
 } from './question.proxy';
 import type { PendingQuestionState, NormalizedQuestionPayload } from './question.proxy';
+import { extractErrorMessage } from './api.response';
 
 type SessionContext = { chatId: string; senderId: string };
 type SelectedModel = { providerID: string; modelID: string; name?: string };
@@ -389,7 +390,7 @@ async function handleMessageUpdatedEvent(
         deps.msgBuffers,
         mid,
         'aborted',
-        (info?.error?.data?.message as string) || 'aborted',
+        extractErrorMessage(info.error) || 'aborted',
       );
     } else if (isOutputLengthError(info.error)) {
       markStatus(deps.msgBuffers, mid, 'error', 'output too long');
@@ -398,14 +399,14 @@ async function handleMessageUpdatedEvent(
         deps.msgBuffers,
         mid,
         'error',
-        (info.error?.data?.message as string) || 'api error',
+        extractErrorMessage(info.error) || 'api error',
       );
     } else {
       markStatus(
         deps.msgBuffers,
         mid,
         'error',
-        (info.error?.data?.message as string) || info.error?.name || 'error',
+        extractErrorMessage(info.error) || info.error?.name || 'error',
       );
     }
     await flushMessage(adapter, ctx.chatId, mid, deps.msgBuffers, true);
@@ -595,19 +596,16 @@ async function handleSessionErrorEvent(
   if (!mid) return;
 
   if (isAbortedError(err)) {
-    markStatus(deps.msgBuffers, mid, 'aborted', (err?.data?.message as string) || 'aborted');
+    markStatus(deps.msgBuffers, mid, 'aborted', extractErrorMessage(err) || 'aborted');
   } else {
     markStatus(
       deps.msgBuffers,
       mid,
       'error',
-      (err?.data?.message as string) || err?.name || 'session.error',
+      extractErrorMessage(err) || err?.name || 'session.error',
     );
   }
-  const errMsg =
-    (err as { data?: { message?: string } })?.data?.message ||
-    (err as { message?: string })?.message ||
-    '-';
+  const errMsg = extractErrorMessage(err) || '-';
   bridgeLogger.warn(
     `[BridgeFlow] session-error sid=${sid} mid=${mid} name=${err?.name || '-'} msg=${errMsg}`,
   );

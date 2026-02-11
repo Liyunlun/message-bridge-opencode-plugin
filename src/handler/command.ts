@@ -7,6 +7,7 @@ import {
   isBridgeAgentId,
 } from '../utils';
 import { bridgeLogger, getBridgeLogFilePath } from '../logger';
+import { isRecord, readString, toApiArray, toApiRecord } from './api.response';
 
 type SessionListItem = { id: string; title: string };
 type AgentListItem = { id: string; name: string };
@@ -14,18 +15,13 @@ type SelectedModel = { providerID: string; modelID: string; name?: string };
 type NamedRecord = { id?: string; name?: string; title?: string; description?: string };
 type AgentCandidate = AgentListItem & { mode?: string };
 
-function isRecord(x: unknown): x is Record<string, unknown> {
-  return typeof x === 'object' && x !== null;
-}
-
-function extractData(value: unknown): unknown {
-  if (isRecord(value) && 'data' in value) return value.data;
-  return value;
-}
+type ProviderModelItem = { id: string; name: string; providerID: string };
+type ProviderItem = { id: string; models: Record<string, ProviderModelItem> };
 
 function asNamedRecords(value: unknown): NamedRecord[] {
-  if (!Array.isArray(value)) return [];
-  return value
+  const list = toApiArray(value);
+  if (list.length === 0) return [];
+  return list
     .map(item => {
       if (!isRecord(item)) return null;
       return {
@@ -36,6 +32,85 @@ function asNamedRecords(value: unknown): NamedRecord[] {
       } as NamedRecord;
     })
     .filter((v): v is NamedRecord => v !== null);
+}
+
+function toStringMap(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v === 'string') out[k] = v;
+  }
+  return out;
+}
+
+function normalizeModels(raw: unknown, fallbackProviderId: string): Record<string, ProviderModelItem> {
+  const out: Record<string, ProviderModelItem> = {};
+
+  if (isRecord(raw)) {
+    for (const [key, value] of Object.entries(raw)) {
+      if (!isRecord(value)) continue;
+      const id = readString(value, 'id', 'modelID', 'modelId') || key;
+      const name = readString(value, 'name', 'title') || id;
+      const providerID = readString(value, 'providerID', 'providerId') || fallbackProviderId;
+      out[key] = { id, name, providerID };
+    }
+    return out;
+  }
+
+  if (Array.isArray(raw)) {
+    raw.forEach((item, idx) => {
+      if (!isRecord(item)) return;
+      const id = readString(item, 'id', 'modelID', 'modelId', 'name');
+      if (!id) return;
+      const name = readString(item, 'name', 'title') || id;
+      const providerID = readString(item, 'providerID', 'providerId') || fallbackProviderId;
+      const key = String(idx + 1);
+      out[key] = { id, name, providerID };
+    });
+  }
+
+  return out;
+}
+
+function parseProvidersResponse(raw: unknown): {
+  providers: ProviderItem[];
+  defaults: Record<string, string>;
+} {
+  const root = toApiRecord(raw) || {};
+  const providersRaw = toApiArray(raw, ['providers']);
+  const defaultFromDefault = toStringMap(root.default);
+  const defaultFromDefaults = toStringMap(root.defaults);
+  const defaults =
+    Object.keys(defaultFromDefault).length > 0
+      ? defaultFromDefault
+      : Object.keys(defaultFromDefaults).length > 0
+        ? defaultFromDefaults
+        : {};
+
+  const providers: ProviderItem[] = providersRaw
+    .map((item, idx) => {
+      if (!isRecord(item)) return null;
+      const providerId =
+        readString(item, 'id', 'providerID', 'providerId', 'name') || `provider-${idx + 1}`;
+      const models = normalizeModels(
+        item.models ?? item.model_list ?? item.items ?? item.list,
+        providerId,
+      );
+      if (Object.keys(models).length === 0) return null;
+      return { id: providerId, models };
+    })
+    .filter((v): v is ProviderItem => v !== null);
+
+  return { providers, defaults: defaults || {} };
+}
+
+function extractShareUrl(raw: unknown): string | undefined {
+  const root = toApiRecord(raw);
+  if (!root) return undefined;
+  const direct = readString(root, 'url', 'share_url', 'shareUrl', 'link');
+  if (direct) return direct;
+  const shareObj = toApiRecord(root.share);
+  return readString(shareObj, 'url', 'link');
 }
 
 function normalizeAgentCandidate(item: unknown): AgentCandidate | null {
@@ -199,7 +274,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
 
   if (normalizedCommand === 'help') {
     const res = await api.command.list();
-    const list = asNamedRecords(extractData(res));
+    const list = asNamedRecords(toApiArray(res, ['commands', 'items', 'list']));
 
     const lines: string[] = [];
     lines.push('## Command');
@@ -269,9 +344,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
 
   if (normalizedCommand === 'models') {
     const res = await api.config.providers();
-    const data = res?.data;
-    const providers = data?.providers ?? [];
-    const defaults = data?.default ?? {};
+    const { providers, defaults } = parseProvidersResponse(res);
 
     if (!Array.isArray(providers) || providers.length === 0) {
       await sendCommandMessage('暂无可用模型信息。');
@@ -423,7 +496,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     }
 
     const res = await api.app.agents();
-    const list = pickUsableAgents(extractData(res));
+    const list = pickUsableAgents(toApiArray(res, ['agents', 'items', 'list']));
     const exact = list.find(a => a.name === targetAgent || a.id === targetAgent);
     if (!exact) {
       await sendCommandMessage(`❌ 未找到 Agent: ${targetAgent}`);
@@ -437,7 +510,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
 
   if (normalizedCommand === 'agent' && !targetAgent) {
     const res = await api.app.agents();
-    const list = pickUsableAgents(extractData(res));
+    const list = pickUsableAgents(toApiArray(res, ['agents', 'items', 'list']));
     if (list.length === 0) {
       await sendCommandMessage('暂无可用 Agent。');
       return true;
@@ -459,7 +532,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     const del = parseSessionDeleteArgs(args);
     if (del.deleteAll || del.refs.length > 0) {
       const listRes = await api.session.list({});
-      const sessions = toSessionList(extractData(listRes));
+      const sessions = toSessionList(toApiArray(listRes, ['sessions', 'items', 'list']));
       if (sessions.length === 0) {
         await sendCommandMessage('暂无会话可删除。');
         return true;
@@ -500,7 +573,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     }
 
     const res = await api.session.list({});
-    const sessions = asNamedRecords(extractData(res));
+    const sessions = asNamedRecords(toApiArray(res, ['sessions', 'items', 'list']));
     if (sessions.length === 0) {
       await sendCommandMessage('暂无会话，请使用 /new 创建。');
       return true;
@@ -543,13 +616,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   if (normalizedCommand === 'share') {
     const sessionId = await ensureSession();
     const res = await api.session.share({ path: { id: sessionId } });
-    const data = extractData(res);
-    const url =
-      isRecord(data) &&
-      isRecord(data.share) &&
-      typeof data.share.url === 'string'
-        ? data.share.url
-        : undefined;
+    const url = extractShareUrl(res);
     await sendCommandMessage(url ? `✅ 分享链接: ${url}` : '✅ 已分享会话。');
     return true;
   }
@@ -584,7 +651,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
 
     const sessionId = await ensureSession();
     const listRes = await api.session.list({});
-    const sessions = toSessionList(extractData(listRes));
+    const sessions = toSessionList(toApiArray(listRes, ['sessions', 'items', 'list']));
     const uniqueTitle = ensureUniqueSessionTitle(nextTitle, sessions, sessionId);
 
     await api.session.update({

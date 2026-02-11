@@ -6,6 +6,8 @@ import { createIncomingHandlerWithDeps } from './incoming.flow';
 import { startGlobalEventListenerWithDeps, stopGlobalEventListenerWithDeps } from './event.flow';
 import { globalState } from '../utils';
 import type { PendingQuestionState } from './question.proxy';
+import type { PendingAuthorizationState } from './authorization.proxy';
+import { extractErrorMessage } from './api.response';
 
 type SessionContext = { chatId: string; senderId: string };
 type SelectedModel = { providerID: string; modelID: string; name?: string };
@@ -28,6 +30,8 @@ const chatMaxFileRetry: Map<string, number> =
 const chatPendingQuestion = new Map<string, PendingQuestionState>();
 const pendingQuestionTimers = new Map<string, NodeJS.Timeout>();
 const chatHandledQuestionCalls = new Map<string, Set<string>>();
+const chatPendingAuthorization = new Map<string, PendingAuthorizationState>();
+const pendingAuthorizationTimers = new Map<string, NodeJS.Timeout>();
 globalState.__bridge_max_file_size = chatMaxFileSizeMb;
 globalState.__bridge_max_file_retry = chatMaxFileRetry;
 
@@ -62,8 +66,7 @@ function clearAllHandledQuestionCalls() {
 }
 
 function formatUserError(err: unknown): string {
-  const e = err as { message?: string; data?: { message?: string } };
-  const msg = String(e?.message || e?.data?.message || 'unknown error');
+  const msg = extractErrorMessage(err) || 'unknown error';
   if (msg.toLowerCase().includes('socket connection was closed unexpectedly')) {
     return '网络异常，资源下载失败，请稍后重试。';
   }
@@ -86,6 +89,23 @@ function clearAllPendingQuestions() {
   pendingQuestionTimers.clear();
   chatPendingQuestion.clear();
   clearAllHandledQuestionCalls();
+}
+
+function clearPendingAuthorizationForChat(cacheKey: string) {
+  const timer = pendingAuthorizationTimers.get(cacheKey);
+  if (timer) {
+    clearTimeout(timer);
+    pendingAuthorizationTimers.delete(cacheKey);
+  }
+  chatPendingAuthorization.delete(cacheKey);
+}
+
+function clearAllPendingAuthorizations() {
+  for (const timer of pendingAuthorizationTimers.values()) {
+    clearTimeout(timer);
+  }
+  pendingAuthorizationTimers.clear();
+  chatPendingAuthorization.clear();
 }
 
 export async function startGlobalEventListener(api: OpencodeClient, mux: AdapterMux) {
@@ -112,6 +132,7 @@ export async function startGlobalEventListener(api: OpencodeClient, mux: Adapter
 }
 
 export function stopGlobalEventListener() {
+  clearAllPendingAuthorizations();
   stopGlobalEventListenerWithDeps({
     listenerState,
     sessionToCtx,
@@ -147,7 +168,10 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
     chatMaxFileSizeMb,
     chatMaxFileRetry,
     chatPendingQuestion,
+    chatPendingAuthorization,
+    pendingAuthorizationTimers,
     clearPendingQuestionForChat,
+    clearPendingAuthorizationForChat,
     markQuestionCallHandled,
     clearAllPendingQuestions,
     formatUserError,

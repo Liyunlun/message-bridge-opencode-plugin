@@ -13,25 +13,29 @@ import {
   renderReplyHint,
 } from './question.proxy';
 import type { PendingQuestionState } from './question.proxy';
+import {
+  AUTH_TIMEOUT_MS,
+  parseAuthorizationReply,
+  renderAuthorizationPrompt,
+  renderAuthorizationReplyHint,
+  renderAuthorizationStatus,
+} from './authorization.proxy';
+import type { PendingAuthorizationState } from './authorization.proxy';
+import {
+  extractErrorMessage,
+  isRecord,
+  readString,
+  toApiArray,
+  toApiRecord,
+} from './api.response';
 
 type SessionContext = { chatId: string; senderId: string };
 type SelectedModel = { providerID: string; modelID: string; name?: string };
 type NamedRecord = { id?: string; name?: string; title?: string; description?: string };
-type DataEnvelope = { data?: unknown };
 const DEFAULT_AGENT_ID = 'build';
 
-function isRecord(x: unknown): x is Record<string, unknown> {
-  return typeof x === 'object' && x !== null;
-}
-
-function extractData(value: unknown): unknown {
-  if (isRecord(value) && 'data' in value) return (value as DataEnvelope).data;
-  return value;
-}
-
 function asArray<T>(value: unknown, map: (item: unknown) => T | null): T[] {
-  if (!Array.isArray(value)) return [];
-  return value.map(map).filter((v): v is T => v !== null);
+  return toApiArray(value).map(map).filter((v): v is T => v !== null);
 }
 
 function toNamedRecord(item: unknown): NamedRecord | null {
@@ -82,6 +86,22 @@ function buildBridgePartMetadata(input: {
   } as const;
 }
 
+function isLikelyPermissionBlockedError(err: unknown): boolean {
+  const msg = (extractErrorMessage(err) || '').toLowerCase();
+  if (!msg) return false;
+  return (
+    msg.includes('permission') ||
+    msg.includes('approval') ||
+    msg.includes('approve') ||
+    msg.includes('consent') ||
+    msg.includes('authorize') ||
+    msg.includes('confirm') ||
+    msg.includes('需要权限') ||
+    msg.includes('等待授权') ||
+    msg.includes('等待确认')
+  );
+}
+
 export type IncomingFlowDeps = {
   sessionCache: Map<string, string>;
   sessionToAdapterKey: Map<string, string>;
@@ -94,7 +114,10 @@ export type IncomingFlowDeps = {
   chatMaxFileSizeMb: Map<string, number>;
   chatMaxFileRetry: Map<string, number>;
   chatPendingQuestion: Map<string, PendingQuestionState>;
+  chatPendingAuthorization: Map<string, PendingAuthorizationState>;
+  pendingAuthorizationTimers: Map<string, NodeJS.Timeout>;
   clearPendingQuestionForChat: (cacheKey: string) => void;
+  clearPendingAuthorizationForChat: (cacheKey: string) => void;
   markQuestionCallHandled: (cacheKey: string, messageId: string, callID: string) => void;
   clearAllPendingQuestions: () => void;
   formatUserError: (err: unknown) => string;
@@ -155,8 +178,9 @@ export const createIncomingHandlerWithDeps = (
           -4,
         )} [${new Date().toLocaleTimeString()}]`;
         const res = await api.session.create({ body: { title: uniqueTitle } });
-        const data = extractData(res);
-        const sessionId = isRecord(data) && typeof data.id === 'string' ? data.id : undefined;
+        const data = toApiRecord(res);
+        const nestedSession = data ? toApiRecord(data.session) : null;
+        const sessionId = readString(data, 'id') || readString(nestedSession, 'id');
         if (sessionId) {
           deps.sessionCache.set(cacheKey, sessionId);
           deps.sessionToAdapterKey.set(sessionId, adapterKey);
@@ -175,6 +199,69 @@ export const createIncomingHandlerWithDeps = (
         }
         if (!sessionId) throw new Error('Failed to init Session');
         return sessionId;
+      };
+
+      const cloneParts = (items: Array<TextPartInput | FilePartInput>) =>
+        items.map(part => {
+          if (part.type === 'text') {
+            return {
+              ...part,
+              ...(part.metadata && typeof part.metadata === 'object'
+                ? { metadata: { ...(part.metadata as Record<string, unknown>) } }
+                : {}),
+            } as TextPartInput;
+          }
+          return { ...part } as FilePartInput;
+        });
+
+      const submitPrompt = async (
+        sessionId: string,
+        partList: Array<TextPartInput | FilePartInput>,
+      ) => {
+        const agent = deps.chatAgent.get(cacheKey);
+        const model = deps.chatModel.get(cacheKey);
+        await api.session.prompt({
+          path: { id: sessionId },
+          body: {
+            parts: partList,
+            ...(agent ? { agent } : {}),
+            ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
+          },
+        });
+      };
+
+      const armPendingAuthorization = async (
+        sessionId: string,
+        source: 'bridge.incoming' | 'bridge.question.resume',
+        deferredParts: Array<TextPartInput | FilePartInput>,
+        reason: string,
+      ) => {
+        deps.clearPendingAuthorizationForChat(cacheKey);
+
+        const pending: PendingAuthorizationState = {
+          key: cacheKey,
+          adapterKey,
+          chatId,
+          senderId,
+          sessionId,
+          blockedReason: reason || '需要网页权限确认',
+          source,
+          deferredParts: cloneParts(deferredParts),
+          createdAt: Date.now(),
+          dueAt: Date.now() + AUTH_TIMEOUT_MS,
+        };
+
+        deps.chatPendingAuthorization.set(cacheKey, pending);
+
+        const timer = setTimeout(async () => {
+          const current = deps.chatPendingAuthorization.get(cacheKey);
+          if (!current || current.sessionId !== sessionId) return;
+          deps.clearPendingAuthorizationForChat(cacheKey);
+          await adapter.sendMessage(chatId, renderAuthorizationStatus('timeout')).catch(() => {});
+        }, AUTH_TIMEOUT_MS);
+        deps.pendingAuthorizationTimers.set(cacheKey, timer);
+
+        await adapter.sendMessage(chatId, renderAuthorizationPrompt(pending)).catch(() => {});
       };
 
       const sendCommandMessage = async (content: string) => {
@@ -204,12 +291,47 @@ export const createIncomingHandlerWithDeps = (
       const isKnownCustomCommand = async (name: string): Promise<boolean | null> => {
         try {
           const res = await api.command.list();
-          const list = asArray(extractData(res), toNamedRecord);
+          const list = asArray(res, toNamedRecord);
           return list.some(cmd => cmd.name === name);
         } catch {
           return null;
         }
       };
+
+      const pendingAuthorization = deps.chatPendingAuthorization.get(cacheKey);
+      if (pendingAuthorization && !slash) {
+        const decision = parseAuthorizationReply(text || '');
+        const hasPayload = hasText || ((parts || []).length > 0);
+
+        if (decision === 'empty' && !hasPayload) {
+          await adapter.sendMessage(chatId, renderAuthorizationReplyHint());
+          return;
+        }
+
+        if (decision === 'resume_blocked') {
+          try {
+            await submitPrompt(pendingAuthorization.sessionId, pendingAuthorization.deferredParts);
+            deps.clearPendingAuthorizationForChat(cacheKey);
+            await adapter.sendMessage(chatId, renderAuthorizationStatus('resume')).catch(() => {});
+          } catch (resumeErr) {
+            if (isLikelyPermissionBlockedError(resumeErr)) {
+              await adapter.sendMessage(chatId, renderAuthorizationStatus('still-blocked')).catch(() => {});
+              return;
+            }
+            throw resumeErr;
+          }
+          return;
+        }
+
+        deps.clearPendingAuthorizationForChat(cacheKey);
+        const nextSessionId = await createNewSession();
+        if (!nextSessionId) throw new Error('Failed to init Session');
+        await adapter.sendMessage(chatId, renderAuthorizationStatus('switch-new')).catch(() => {});
+
+        if (decision === 'start_new_session') {
+          return;
+        }
+      }
 
       if (slash) {
         const handled = await handleSlashCommand({
@@ -269,29 +391,30 @@ export const createIncomingHandlerWithDeps = (
           const sessionId = await ensureSession();
           deps.sessionToAdapterKey.set(sessionId, adapterKey);
           deps.sessionToCtx.set(sessionId, { chatId, senderId });
-
-          const agent = deps.chatAgent.get(cacheKey);
-          const model = deps.chatModel.get(cacheKey);
-          await api.session.prompt({
-            path: { id: sessionId },
-            body: {
-              parts: [
-                {
-                  type: 'text',
-                  text: buildResumePrompt(pendingQuestion, resolved.answers, 'user'),
-                  metadata: buildBridgePartMetadata({
-                    adapterKey,
-                    chatId,
-                    senderId,
-                    sessionId,
-                    source: 'bridge.question.resume',
-                  }),
-                },
-              ],
-              ...(agent ? { agent } : {}),
-              ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
+          const resumeParts: Array<TextPartInput | FilePartInput> = [
+            {
+              type: 'text',
+              text: buildResumePrompt(pendingQuestion, resolved.answers, 'user'),
+              metadata: buildBridgePartMetadata({
+                adapterKey,
+                chatId,
+                senderId,
+                sessionId,
+                source: 'bridge.question.resume',
+              }),
             },
-          });
+          ];
+          try {
+            await submitPrompt(sessionId, resumeParts);
+          } catch (submitErr) {
+            if (!isLikelyPermissionBlockedError(submitErr)) throw submitErr;
+            await armPendingAuthorization(
+              sessionId,
+              'bridge.question.resume',
+              resumeParts,
+              extractErrorMessage(submitErr) || '当前会话需要网页权限确认',
+            );
+          }
           return;
         }
       }
@@ -394,8 +517,6 @@ export const createIncomingHandlerWithDeps = (
       deps.sessionToAdapterKey.set(sessionId, adapterKey);
       deps.sessionToCtx.set(sessionId, { chatId, senderId });
 
-      const agent = deps.chatAgent.get(cacheKey);
-      const model = deps.chatModel.get(cacheKey);
       const partList: Array<TextPartInput | FilePartInput> = [];
       if (text && text.trim()) {
         partList.push({
@@ -420,16 +541,20 @@ export const createIncomingHandlerWithDeps = (
       if (partList.length === 0) return;
 
       bridgeLogger.info(
-        `[Incoming] prompt adapter=${adapterKey} chat=${chatId} parts=${partList.length} text=${hasText} files=${pendingFiles.length} agent=${agent || '-'} model=${model?.name || model?.modelID || '-'}`,
+        `[Incoming] prompt adapter=${adapterKey} chat=${chatId} parts=${partList.length} text=${hasText} files=${pendingFiles.length} agent=${deps.chatAgent.get(cacheKey) || '-'} model=${deps.chatModel.get(cacheKey)?.name || deps.chatModel.get(cacheKey)?.modelID || '-'}`,
       );
-      await api.session.prompt({
-        path: { id: sessionId },
-        body: {
-          parts: partList,
-          ...(agent ? { agent } : {}),
-          ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
-        },
-      });
+      try {
+        await submitPrompt(sessionId, partList);
+      } catch (submitErr) {
+        if (!isLikelyPermissionBlockedError(submitErr)) throw submitErr;
+        await armPendingAuthorization(
+          sessionId,
+          'bridge.incoming',
+          partList,
+          extractErrorMessage(submitErr) || '当前会话需要网页权限确认',
+        );
+        return;
+      }
       bridgeLogger.info(`[Incoming] prompt-sent adapter=${adapterKey} session=${sessionId}`);
     } catch (err: unknown) {
       bridgeLogger.error(`[Incoming] adapter=${adapterKey} chat=${chatId} failed`, err);
