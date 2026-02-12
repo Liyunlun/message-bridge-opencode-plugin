@@ -672,20 +672,32 @@ async function handleSessionIdleEvent(
 }
 
 async function handlePermissionUpdatedEvent(
-  event: EventPermissionUpdated,
+  event: EventPermissionUpdated | EventWithType,
   mux: AdapterMux,
   deps: EventFlowDeps,
 ) {
-  const permission = event.properties;
-  const sessionId = permission.sessionID;
-  if (!sessionId || !permission.id) return;
+  const permission = (event.properties || {}) as Record<string, unknown>;
+  const sessionId = readStringField(permission, 'sessionID');
+  const permissionID = readStringField(permission, 'id', 'permissionID', 'requestID');
+  const permissionType = readStringField(permission, 'type', 'permission');
+  const permissionTitle = readStringField(permission, 'title') || permissionType || '权限请求';
+  const permissionPattern =
+    permission.pattern ??
+    (Array.isArray(permission.patterns) ? permission.patterns : undefined);
+  const tool =
+    permission.tool && typeof permission.tool === 'object'
+      ? (permission.tool as Record<string, unknown>)
+      : undefined;
+  const callID = readStringField(permission, 'callID') || readStringField(tool || {}, 'callID');
+
+  if (!sessionId || !permissionID) return;
   bridgeLogger.info(
-    `[BridgePermission] updated sid=${sessionId} permissionID=${permission.id} type=${permission.type || '-'} callID=${permission.callID || '-'} title=${(permission.title || '').slice(0, 160)} pattern=${Array.isArray(permission.pattern) ? permission.pattern.join('|') : (permission.pattern || '-')}`,
+    `[BridgePermission] updated sid=${sessionId} permissionID=${permissionID} type=${permissionType || '-'} callID=${callID || '-'} title=${(permissionTitle || '').slice(0, 160)} pattern=${Array.isArray(permissionPattern) ? permissionPattern.join('|') : ((permissionPattern as string) || '-')}`,
   );
 
   const route = getCacheKeyBySession(sessionId, deps);
   if (!route) {
-    warnRouteMissOnce('permission.updated', sessionId);
+    warnRouteMissOnce((event.type as string) || 'permission.updated', sessionId);
     return;
   }
   const { cacheKey, adapterKey, chatId } = route;
@@ -702,11 +714,11 @@ async function handlePermissionUpdatedEvent(
     chatId,
     senderId: ctx.senderId,
     sessionId,
-    permissionID: permission.id,
-    permissionType: permission.type,
-    permissionTitle: permission.title,
-    permissionPattern: permission.pattern,
-    blockedReason: permission.title || permission.type || '权限请求',
+    permissionID,
+    permissionType,
+    permissionTitle,
+    permissionPattern: permissionPattern as string | Array<string> | undefined,
+    blockedReason: permissionTitle,
     source: 'bridge.incoming',
     createdAt: Date.now(),
     dueAt: Date.now() + AUTH_TIMEOUT_MS,
@@ -715,7 +727,7 @@ async function handlePermissionUpdatedEvent(
 
   const timer = setTimeout(async () => {
     const current = deps.chatPendingAuthorization.get(cacheKey);
-    if (!current || current.permissionID !== permission.id) return;
+    if (!current || current.permissionID !== permissionID) return;
     clearPendingAuthorizationForChat(deps, cacheKey);
     await adapter.sendMessage(chatId, '## Status\n⏰ 权限请求已超时未处理。').catch(() => {});
   }, AUTH_TIMEOUT_MS);
@@ -725,17 +737,20 @@ async function handlePermissionUpdatedEvent(
 }
 
 function handlePermissionRepliedEvent(event: EventPermissionReplied, deps: EventFlowDeps) {
-  const sessionId = event.properties.sessionID;
+  const props = (event.properties || {}) as Record<string, unknown>;
+  const sessionId = readStringField(props, 'sessionID');
   if (!sessionId) return;
+  const permissionID = readStringField(props, 'permissionID', 'requestID') || '';
+  const response = readStringField(props, 'response', 'reply') || '-';
   bridgeLogger.info(
-    `[BridgePermission] replied sid=${sessionId} permissionID=${event.properties.permissionID} response=${event.properties.response || '-'}`,
+    `[BridgePermission] replied sid=${sessionId} permissionID=${permissionID || '-'} response=${response}`,
   );
   const route = getCacheKeyBySession(sessionId, deps);
   if (!route) return;
   const { cacheKey } = route;
   const pending = deps.chatPendingAuthorization.get(cacheKey);
   if (!pending || pending.mode !== 'permission_request') return;
-  if (!pending.permissionID || pending.permissionID !== event.properties.permissionID) return;
+  if (!pending.permissionID || pending.permissionID !== permissionID) return;
   clearPendingAuthorizationForChat(deps, cacheKey);
 }
 
@@ -803,7 +818,7 @@ export async function startGlobalEventListenerWithDeps(
           continue;
         }
 
-        if (e.type === 'permission.updated') {
+        if (e.type === 'permission.updated' || e.type === 'permission.asked') {
           await handlePermissionUpdatedEvent(e as EventPermissionUpdated, mux, deps);
           continue;
         }
@@ -843,7 +858,7 @@ export async function startGlobalEventListenerWithDeps(
         const e = unwrapObservedEvent(event);
         if (deps.listenerState.shouldStopListener) break;
         if (!e) continue;
-        if (e.type === 'permission.updated') {
+        if (e.type === 'permission.updated' || e.type === 'permission.asked') {
           await handlePermissionUpdatedEvent(e as EventPermissionUpdated, mux, deps);
           continue;
         }

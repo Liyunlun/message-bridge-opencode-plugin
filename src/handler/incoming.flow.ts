@@ -314,12 +314,31 @@ export const createIncomingHandlerWithDeps = (
             : decision === 'allow_always'
               ? 'always'
               : 'reject';
-        await api.postSessionIdPermissionsPermissionId({
+        // Prefer v2 permission.reply when available; fallback to v1 session permission endpoint.
+        const apiAny = api as unknown as {
+          permission?: { reply?: (args: unknown) => Promise<unknown> };
+          postSessionIdPermissionsPermissionId?: (args: unknown) => Promise<unknown>;
+        };
+        if (apiAny.permission?.reply) {
+          await apiAny.permission.reply({
+            path: { requestID: permissionID },
+            body: { reply: response },
+          });
+          bridgeLogger.info(
+            `[BridgePermission] reply sent(v2) sid=${sessionId} requestID=${permissionID} reply=${response}`,
+          );
+          return;
+        }
+
+        if (!apiAny.postSessionIdPermissionsPermissionId) {
+          throw new Error('permission reply endpoint unavailable');
+        }
+        await apiAny.postSessionIdPermissionsPermissionId({
           path: { id: sessionId, permissionID },
           body: { response },
         });
         bridgeLogger.info(
-          `[BridgePermission] reply sent sid=${sessionId} permissionID=${permissionID} response=${response}`,
+          `[BridgePermission] reply sent(v1) sid=${sessionId} permissionID=${permissionID} response=${response}`,
         );
       };
 
