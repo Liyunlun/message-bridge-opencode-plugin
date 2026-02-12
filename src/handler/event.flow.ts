@@ -51,24 +51,35 @@ type ListenerState = { isListenerStarted: boolean; shouldStopListener: boolean }
 type EventWithType = { type: string; properties?: unknown };
 type EventMessageBuffer = MessageBuffer & { __executionCarried?: boolean };
 const ROUTE_MISS_WARN_INTERVAL_MS = 30_000;
+const PERMISSION_DEDUPE_WINDOW_MS = 3_000;
 const lastRouteMissWarnAt = new Map<string, number>();
 const forwardedSchedulerUserParts = new Set<string>();
+const recentPermissionEventAt = new Map<string, number>();
 
 function unwrapObservedEvent(event: unknown): EventWithType | null {
-  if (event && typeof event === 'object') {
-    const direct = event as { type?: unknown; properties?: unknown };
-    if (typeof direct.type === 'string') {
-      return direct as EventWithType;
-    }
-    const payload = (event as { payload?: unknown }).payload;
-    if (payload && typeof payload === 'object') {
-      const nested = payload as { type?: unknown; properties?: unknown };
-      if (typeof nested.type === 'string') {
-        return nested as EventWithType;
-      }
+  const direct = event as { type?: unknown; properties?: unknown; payload?: unknown } | null;
+  if (direct && typeof direct.type === 'string') return direct as EventWithType;
+
+  const nested = direct?.payload as { type?: unknown; properties?: unknown } | null;
+  if (nested && typeof nested.type === 'string') return nested as EventWithType;
+
+  return null;
+}
+
+function shouldSkipDuplicatePermissionEvent(scope: 'request' | 'reply', sid: string, id: string): boolean {
+  const now = Date.now();
+  const key = `${scope}:${sid}:${id}`;
+  const last = recentPermissionEventAt.get(key);
+  recentPermissionEventAt.set(key, now);
+
+  if (recentPermissionEventAt.size > 2000) {
+    const cutoff = now - PERMISSION_DEDUPE_WINDOW_MS * 4;
+    for (const [k, ts] of recentPermissionEventAt.entries()) {
+      if (ts < cutoff) recentPermissionEventAt.delete(k);
     }
   }
-  return null;
+
+  return typeof last === 'number' && now - last < PERMISSION_DEDUPE_WINDOW_MS;
 }
 
 export type EventFlowDeps = {
@@ -691,6 +702,12 @@ async function handlePermissionUpdatedEvent(
   const callID = readStringField(permission, 'callID') || readStringField(tool || {}, 'callID');
 
   if (!sessionId || !permissionID) return;
+  if (shouldSkipDuplicatePermissionEvent('request', sessionId, permissionID)) {
+    bridgeLogger.debug(
+      `[BridgePermission] dedupe skip request sid=${sessionId} permissionID=${permissionID}`,
+    );
+    return;
+  }
   bridgeLogger.info(
     `[BridgePermission] updated sid=${sessionId} permissionID=${permissionID} type=${permissionType || '-'} callID=${callID || '-'} title=${(permissionTitle || '').slice(0, 160)} pattern=${Array.isArray(permissionPattern) ? permissionPattern.join('|') : ((permissionPattern as string) || '-')}`,
   );
@@ -742,6 +759,12 @@ function handlePermissionRepliedEvent(event: EventPermissionReplied, deps: Event
   if (!sessionId) return;
   const permissionID = readStringField(props, 'permissionID', 'requestID') || '';
   const response = readStringField(props, 'response', 'reply') || '-';
+  if (permissionID && shouldSkipDuplicatePermissionEvent('reply', sessionId, permissionID)) {
+    bridgeLogger.debug(
+      `[BridgePermission] dedupe skip reply sid=${sessionId} permissionID=${permissionID} response=${response}`,
+    );
+    return;
+  }
   bridgeLogger.info(
     `[BridgePermission] replied sid=${sessionId} permissionID=${permissionID || '-'} response=${response}`,
   );
