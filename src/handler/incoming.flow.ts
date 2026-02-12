@@ -122,6 +122,7 @@ export type IncomingFlowDeps = {
   pendingAuthorizationTimers: Map<string, NodeJS.Timeout>;
   clearPendingQuestionForChat: (cacheKey: string) => void;
   clearPendingAuthorizationForChat: (cacheKey: string) => void;
+  clearAllPendingAuthorizations: () => void;
   markQuestionCallHandled: (cacheKey: string, messageId: string, callID: string) => void;
   clearAllPendingQuestions: () => void;
   formatUserError: (err: unknown) => string;
@@ -169,6 +170,7 @@ export const createIncomingHandlerWithDeps = (
     }
 
     let reactionId: string | null = null;
+    let shouldClearProgressMsg = false;
 
     try {
       if (messageId && adapter.addReaction) {
@@ -440,8 +442,12 @@ export const createIncomingHandlerWithDeps = (
           chatAwaitingSaveFile: deps.chatAwaitingSaveFile,
           chatMaxFileSizeMb: deps.chatMaxFileSizeMb,
           chatMaxFileRetry: deps.chatMaxFileRetry,
+          chatPendingQuestion: deps.chatPendingQuestion,
+          chatPendingAuthorization: deps.chatPendingAuthorization,
+          pendingAuthorizationTimers: deps.pendingAuthorizationTimers,
           clearPendingQuestionForChat: deps.clearPendingQuestionForChat,
           clearPendingAuthorizationForChat: deps.clearPendingAuthorizationForChat,
+          clearAllPendingAuthorizations: deps.clearAllPendingAuthorizations,
           markQuestionCallHandled: deps.markQuestionCallHandled,
           clearAllPendingQuestions: deps.clearAllPendingQuestions,
           ensureSession,
@@ -506,6 +512,9 @@ export const createIncomingHandlerWithDeps = (
       }
 
       const fileParts = (parts || []).filter(isFilePartInput);
+      if (fileParts.length > 0 && messageId) {
+        shouldClearProgressMsg = true;
+      }
 
       if (fileParts.length > 0) {
         const isSaveFileMode = deps.chatAwaitingSaveFile.get(cacheKey) === true;
@@ -646,6 +655,9 @@ export const createIncomingHandlerWithDeps = (
       bridgeLogger.error(`[Incoming] adapter=${adapterKey} chat=${chatId} failed`, err);
       await adapter.sendMessage(chatId, `${ERROR_HEADER}\n${deps.formatUserError(err)}`);
     } finally {
+      if (shouldClearProgressMsg && messageId) {
+        globalState.__bridge_progress_msg_ids?.delete(messageId);
+      }
       if (messageId && reactionId && adapter.removeReaction) {
         await adapter.removeReaction(messageId, reactionId).catch(() => {});
       }

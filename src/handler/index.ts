@@ -176,6 +176,7 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
     pendingAuthorizationTimers,
     clearPendingQuestionForChat,
     clearPendingAuthorizationForChat,
+    clearAllPendingAuthorizations,
     markQuestionCallHandled,
     clearAllPendingQuestions,
     formatUserError,
