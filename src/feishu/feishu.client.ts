@@ -26,7 +26,7 @@ import {
 } from './patch';
 import { LoggerLevel } from '@larksuiteoapi/node-sdk';
 import { BRIDGE_FEISHU_RESPONSE_TIMEOUT_MS } from '../constants';
-import { sanitizeTemplateMarkers } from '../utils';
+import { sanitizeLarkMdForCard } from '../utils';
 
 function clip(s: string, n = 2000) {
   if (!s) return '';
@@ -808,7 +808,7 @@ export class FeishuClient {
       elements: [
         {
           tag: 'div',
-          text: { tag: 'lark_md', content: sanitizeTemplateMarkers(raw) },
+          text: { tag: 'lark_md', content: sanitizeLarkMdForCard(raw) },
         },
       ],
     });
