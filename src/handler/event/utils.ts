@@ -35,6 +35,7 @@ export const KNOWN_EVENT_TYPES = new Set<string>([
   'pty.exited',
   'pty.deleted',
   'server.connected',
+  'server.heartbeat',
   // v2/compat
   'permission.asked',
   'question.asked',

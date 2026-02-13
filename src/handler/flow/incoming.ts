@@ -341,6 +341,32 @@ export const createIncomingHandlerWithDeps = (
         );
       };
 
+      const replyQuestionRequest = async (
+        sessionId: string,
+        requestID: string,
+        answers: Array<{ selectedLabel: string }>,
+      ): Promise<'v2' | 'fallback'> => {
+        const apiAny = api as unknown as {
+          question?: { reply?: (args: unknown) => Promise<unknown> };
+        };
+        if (apiAny.question?.reply) {
+          await apiAny.question.reply({
+            path: { requestID },
+            body: {
+              answers: answers.map(ans => [ans.selectedLabel]),
+            },
+          });
+          bridgeLogger.info(
+            `[QuestionFlow] reply sent(v2) sid=${sessionId} requestID=${requestID} answers=${answers.length}`,
+          );
+          return 'v2';
+        }
+        bridgeLogger.warn(
+          `[QuestionFlow] question.reply endpoint unavailable sid=${sessionId} requestID=${requestID}, fallback=resume-prompt`,
+        );
+        return 'fallback';
+      };
+
       const pendingAuthorization = deps.chatPendingAuthorization.get(cacheKey);
       if (pendingAuthorization && !slash) {
         let decision = parseAuthorizationReply(text || '');
@@ -473,37 +499,54 @@ export const createIncomingHandlerWithDeps = (
             `[QuestionFlow] invalid-option-exit adapter=${adapterKey} chat=${chatId} sid=${pendingQuestion.sessionId} call=${pendingQuestion.callID} reason=${resolved.reason}`,
           );
         } else {
-          deps.markQuestionCallHandled(cacheKey, pendingQuestion.messageId, pendingQuestion.callID);
-          deps.clearPendingQuestionForChat(cacheKey);
-          await adapter.sendMessage(chatId, renderAnswerSummary(pendingQuestion, resolved.answers, 'user'));
-
           const sessionId = await ensureSession();
           deps.sessionToAdapterKey.set(sessionId, adapterKey);
           deps.sessionToCtx.set(sessionId, { chatId, senderId });
-          const resumeParts: Array<TextPartInput | FilePartInput> = [
-            {
-              type: 'text',
-              text: buildResumePrompt(pendingQuestion, resolved.answers, 'user'),
-              metadata: buildBridgePartMetadata({
-                adapterKey,
-                chatId,
-                senderId,
-                sessionId,
-                source: 'bridge.question.resume',
-              }),
-            },
-          ];
+          let questionReplied = false;
           try {
-            await submitPrompt(sessionId, resumeParts);
-          } catch (submitErr) {
-            if (!isLikelyPermissionBlockedError(submitErr)) throw submitErr;
-            await armPendingAuthorization(
+            const mode = await replyQuestionRequest(
               sessionId,
-              'bridge.question.resume',
-              resumeParts,
-              extractErrorMessage(submitErr) || '当前会话需要网页权限确认',
+              pendingQuestion.callID,
+              resolved.answers,
+            );
+            questionReplied = mode === 'v2';
+          } catch (replyErr) {
+            bridgeLogger.warn(
+              `[QuestionFlow] reply failed sid=${sessionId} requestID=${pendingQuestion.callID}`,
+              replyErr,
             );
           }
+
+          if (!questionReplied) {
+            const resumeParts: Array<TextPartInput | FilePartInput> = [
+              {
+                type: 'text',
+                text: buildResumePrompt(pendingQuestion, resolved.answers, 'user'),
+                metadata: buildBridgePartMetadata({
+                  adapterKey,
+                  chatId,
+                  senderId,
+                  sessionId,
+                  source: 'bridge.question.resume',
+                }),
+              },
+            ];
+            try {
+              await submitPrompt(sessionId, resumeParts);
+            } catch (submitErr) {
+              if (!isLikelyPermissionBlockedError(submitErr)) throw submitErr;
+              await armPendingAuthorization(
+                sessionId,
+                'bridge.question.resume',
+                resumeParts,
+                extractErrorMessage(submitErr) || '当前会话需要网页权限确认',
+              );
+            }
+          }
+
+          deps.markQuestionCallHandled(cacheKey, pendingQuestion.messageId, pendingQuestion.callID);
+          deps.clearPendingQuestionForChat(cacheKey);
+          await adapter.sendMessage(chatId, renderAnswerSummary(pendingQuestion, resolved.answers, 'user'));
           return;
         }
       }
