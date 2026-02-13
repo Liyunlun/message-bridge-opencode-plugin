@@ -1,6 +1,5 @@
 import type { MessageBuffer } from '../../bridge/buffer';
-import type { PendingQuestionState } from '../question.proxy';
-import type { PendingAuthorizationState } from '../authorization.proxy';
+import type { PendingAuthorizationState, PendingQuestionState } from '../proxy';
 
 export type SessionContext = { chatId: string; senderId: string };
 export type SelectedModel = { providerID: string; modelID: string; name?: string };

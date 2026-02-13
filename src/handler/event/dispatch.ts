@@ -24,7 +24,7 @@ import {
   safeEditWithRetry,
   flushAll as flushAllMessages,
   flushMessage as flushOneMessage,
-} from '../message.delivery';
+} from '../flow';
 import {
   buildFinalizedExecutionContent,
   buildPlatformDisplay,
@@ -33,8 +33,8 @@ import {
   shouldCarryPlatformMessageAcrossAssistantMessages,
   shouldSplitOutFinalAnswer,
   splitFinalAnswerFromExecution,
-} from '../execution.flow';
-import { extractErrorMessage } from '../api.response';
+} from '../flow';
+import { extractErrorMessage } from '../shared';
 import {
   type EventWithType,
   KNOWN_EVENT_TYPES,

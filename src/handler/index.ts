@@ -3,12 +3,11 @@ import type { OpencodeClient } from '@opencode-ai/sdk';
 import { LRUCache } from 'lru-cache';
 import type { MessageBuffer } from '../bridge/buffer';
 import { AdapterMux } from './mux';
-import { createIncomingHandlerWithDeps } from './incoming.flow';
+import { createIncomingHandlerWithDeps } from './flow';
 import { startGlobalEventListenerWithDeps, stopGlobalEventListenerWithDeps } from './event';
 import { globalState } from '../utils';
-import type { PendingQuestionState } from './question.proxy';
-import type { PendingAuthorizationState } from './authorization.proxy';
-import { extractErrorMessage } from './api.response';
+import type { PendingAuthorizationState, PendingQuestionState } from './proxy';
+import { extractErrorMessage } from './shared';
 
 type SessionContext = { chatId: string; senderId: string };
 type SelectedModel = { providerID: string; modelID: string; name?: string };

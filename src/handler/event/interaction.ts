@@ -2,10 +2,15 @@ import type { EventPermissionReplied, EventPermissionUpdated, OpencodeClient, To
 import { LRUCache } from 'lru-cache';
 import { bridgeLogger } from '../../logger';
 import type { AdapterMux } from '../mux';
-import { extractQuestionPayload, isQuestionToolPart, QUESTION_TIMEOUT_MS, renderQuestionPrompt } from '../question.proxy';
-import type { PendingQuestionState, NormalizedQuestionPayload } from '../question.proxy';
-import { AUTH_TIMEOUT_MS, renderAuthorizationPrompt } from '../authorization.proxy';
-import type { PendingAuthorizationState } from '../authorization.proxy';
+import {
+  AUTH_TIMEOUT_MS,
+  extractQuestionPayload,
+  isQuestionToolPart,
+  QUESTION_TIMEOUT_MS,
+  renderAuthorizationPrompt,
+  renderQuestionPrompt,
+} from '../proxy';
+import type { NormalizedQuestionPayload, PendingAuthorizationState, PendingQuestionState } from '../proxy';
 import { readStringField, type EventWithType } from './utils';
 import type { EventFlowDeps } from './types';
 

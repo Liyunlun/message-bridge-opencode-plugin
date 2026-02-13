@@ -8,7 +8,7 @@ import {
 } from '../utils';
 import { getFileStoreCacheStats } from '../bridge/file.store';
 import { bridgeLogger, getBridgeLogFilePath } from '../logger';
-import { isRecord, readString, toApiArray, toApiRecord } from './api.response';
+import { isRecord, readString, toApiArray, toApiRecord } from './shared';
 
 type SessionListItem = { id: string; title: string };
 type AgentListItem = { id: string; name: string };

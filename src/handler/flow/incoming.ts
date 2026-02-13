@@ -1,33 +1,30 @@
 import type { FilePartInput, OpencodeClient, TextPartInput } from '@opencode-ai/sdk';
-import type { BridgeAdapter } from '../types';
-import { LOADING_EMOJI } from '../constants';
-import { drainPendingFileParts, saveFilePartToLocal } from '../bridge/file.store';
-import { ERROR_HEADER, parseSlashCommand, globalState } from '../utils';
-import { bridgeLogger } from '../logger';
-import { handleSlashCommand } from './command';
-import type { AdapterMux } from './mux';
-import {
-  buildResumePrompt,
-  parseUserReply,
-  renderAnswerSummary,
-  renderReplyHint,
-} from './question.proxy';
-import type { PendingQuestionState } from './question.proxy';
+import type { BridgeAdapter } from '../../types';
+import { LOADING_EMOJI } from '../../constants';
+import { drainPendingFileParts, saveFilePartToLocal } from '../../bridge/file.store';
+import { ERROR_HEADER, parseSlashCommand, globalState } from '../../utils';
+import { bridgeLogger } from '../../logger';
+import { handleSlashCommand } from '../command';
+import type { AdapterMux } from '../mux';
 import {
   AUTH_TIMEOUT_MS,
+  buildResumePrompt,
   parseAuthorizationReply,
+  parseUserReply,
   renderAuthorizationPrompt,
   renderAuthorizationReplyHint,
   renderAuthorizationStatus,
-} from './authorization.proxy';
-import type { PendingAuthorizationState } from './authorization.proxy';
+  renderAnswerSummary,
+  renderReplyHint,
+} from '../proxy';
+import type { PendingAuthorizationState, PendingQuestionState } from '../proxy';
 import {
   extractErrorMessage,
   isRecord,
   readString,
   toApiArray,
   toApiRecord,
-} from './api.response';
+} from '../shared';
 
 type SessionContext = { chatId: string; senderId: string };
 type SelectedModel = { providerID: string; modelID: string; name?: string };
