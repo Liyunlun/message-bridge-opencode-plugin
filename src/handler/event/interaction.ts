@@ -39,6 +39,53 @@ function getCacheKeyBySession(
   };
 }
 
+function hydrateSessionRouteFromEventProps(
+  sessionId: string,
+  props: Record<string, unknown>,
+  deps: EventFlowDeps
+): boolean {
+  const candidates: Array<Record<string, unknown>> = [props];
+  const route =
+    props.route && typeof props.route === 'object' ? (props.route as Record<string, unknown>) : undefined;
+  if (route) candidates.push(route);
+  const metadata =
+    props.metadata && typeof props.metadata === 'object'
+      ? (props.metadata as Record<string, unknown>)
+      : undefined;
+  if (metadata) candidates.push(metadata);
+  const metadataRoute =
+    metadata?.route && typeof metadata.route === 'object'
+      ? (metadata.route as Record<string, unknown>)
+      : undefined;
+  if (metadataRoute) candidates.push(metadataRoute);
+  const tool =
+    props.tool && typeof props.tool === 'object' ? (props.tool as Record<string, unknown>) : undefined;
+  if (tool) candidates.push(tool);
+
+  let chatId = '';
+  let adapterKey = '';
+  for (const c of candidates) {
+    if (!chatId) chatId = readStringField(c, 'chat_id', 'chatId') || '';
+    if (!adapterKey) adapterKey = readStringField(c, 'adapter_key', 'adapterKey', 'adapter') || '';
+    if (chatId && adapterKey) break;
+  }
+  if (!chatId || !adapterKey) return false;
+
+  const existingCtx = deps.sessionToCtx.get(sessionId);
+  const existingAdapter = deps.sessionToAdapterKey.get(sessionId);
+  if (!existingCtx) {
+    const senderId =
+      readStringField(props, 'sender_id', 'senderId') ||
+      readStringField(route || {}, 'sender_id', 'senderId') ||
+      'system';
+    deps.sessionToCtx.set(sessionId, { chatId, senderId });
+  }
+  if (!existingAdapter) {
+    deps.sessionToAdapterKey.set(sessionId, adapterKey);
+  }
+  return true;
+}
+
 function clearPendingQuestionForChat(deps: EventFlowDeps, cacheKey: string) {
   const timer = deps.pendingQuestionTimers.get(cacheKey);
   if (timer) {
@@ -138,14 +185,33 @@ export async function captureQuestionProxyIfNeeded(params: {
   const { part, sessionId, messageId, mux, deps } = params;
   if (!isQuestionToolPart(part)) return false;
 
-  const payloadMaybe = extractQuestionPayload(part?.state?.input);
-  if (payloadMaybe === null) return false;
+  const payloadMaybe =
+    extractQuestionPayload(part?.state?.input) ||
+    extractQuestionPayload((part?.state?.input as Record<string, unknown> | undefined)?.questions) ||
+    extractQuestionPayload((part?.state?.input as Record<string, unknown> | undefined)?.question);
+  const fallbackPayload =
+    payloadMaybe ||
+    extractQuestionPayload([
+      {
+        id: part.callID || `q-${messageId}`,
+        question:
+          readStringField((part?.state?.input as Record<string, unknown> | undefined) || {}, 'question', 'prompt', 'title', 'text') ||
+          '检测到网页侧需要额外输入，请直接回复要填写的内容。',
+        freeText: true,
+      },
+    ]);
+  if (fallbackPayload === null) return false;
+  if (payloadMaybe === null) {
+    bridgeLogger.warn(
+      `[BridgeFlow] question.tool parse-fallback sid=${sessionId} mid=${messageId} callID=${part.callID || '-'}`,
+    );
+  }
   const callID = part.callID || `question-${messageId}`;
   return armPendingQuestionPrompt({
     sessionId,
     messageId,
     callID,
-    payload: payloadMaybe,
+    payload: fallbackPayload,
     mux,
     deps,
   });
@@ -157,14 +223,67 @@ export async function handleQuestionAskedEvent(
   deps: EventFlowDeps
 ): Promise<void> {
   const props = (event.properties || {}) as Record<string, unknown>;
-  const sessionId = readStringField(props, 'sessionID');
+  const sessionId = readStringField(props, 'sessionID', 'sessionId');
   if (!sessionId) return;
+  hydrateSessionRouteFromEventProps(sessionId, props, deps);
 
-  const questions = Array.isArray(props.questions) ? props.questions : [];
-  const payloadMaybe = extractQuestionPayload({ questions });
+  const payloadMaybe =
+    extractQuestionPayload(props.questions) ||
+    extractQuestionPayload(props.question) ||
+    extractQuestionPayload(props.input) ||
+    extractQuestionPayload(props);
   if (!payloadMaybe) {
+    const fallbackQuestion =
+      readStringField(props, 'question', 'prompt', 'title', 'text') ||
+      '检测到网页侧需要额外输入，请直接回复要填写的内容。';
+    const fallbackPayload = extractQuestionPayload([
+      {
+        id: readStringField(props, 'id', 'requestID', 'callID') || `q-${Date.now()}`,
+        question: fallbackQuestion,
+        freeText: true,
+      },
+    ]);
+    if (fallbackPayload) {
+      const toolFallback =
+        props.tool && typeof props.tool === 'object'
+          ? (props.tool as Record<string, unknown>)
+          : undefined;
+      const fallbackMessageId =
+        readStringField(toolFallback || {}, 'messageID', 'messageId') ||
+        readStringField(props, 'messageID', 'messageId') ||
+        `question-${sessionId}`;
+      const fallbackCallID =
+        readStringField(toolFallback || {}, 'callID', 'callId') ||
+        readStringField(props, 'id', 'requestID', 'requestId') ||
+        `question-${fallbackMessageId}`;
+      bridgeLogger.warn(
+        `[BridgeFlow] question.asked parse-fallback sid=${sessionId} callID=${fallbackCallID} mid=${fallbackMessageId}`,
+      );
+      await armPendingQuestionPrompt({
+        sessionId,
+        messageId: fallbackMessageId,
+        callID: fallbackCallID,
+        payload: fallbackPayload,
+        mux,
+        deps,
+      });
+      return;
+    }
+
+    const firstQuestion =
+      Array.isArray(props.questions) &&
+      props.questions.length > 0 &&
+      typeof props.questions[0] === 'object' &&
+      props.questions[0] !== null
+        ? (props.questions[0] as Record<string, unknown>)
+        : undefined;
+    const firstQuestionKeys = firstQuestion ? Object.keys(firstQuestion).slice(0, 12).join(',') : '-';
     bridgeLogger.warn(
-      `[BridgeFlow] question.asked ignored sid=${sessionId} reason=invalid-payload questions=${questions.length}`
+      `[BridgeFlow] question.asked ignored sid=${sessionId} reason=invalid-payload questions=${Array.isArray(props.questions) ? props.questions.length : 0} propKeys=${Object.keys(
+        props,
+      )
+        .slice(0, 20)
+        .join(',')} firstQuestionKeys=${firstQuestionKeys}`
     );
     return;
   }
@@ -174,12 +293,12 @@ export async function handleQuestionAskedEvent(
       ? (props.tool as Record<string, unknown>)
       : undefined;
   const messageId =
-    readStringField(tool || {}, 'messageID') ||
-    readStringField(props, 'messageID') ||
+    readStringField(tool || {}, 'messageID', 'messageId') ||
+    readStringField(props, 'messageID', 'messageId') ||
     `question-${sessionId}`;
   const callID =
-    readStringField(tool || {}, 'callID') ||
-    readStringField(props, 'id', 'requestID') ||
+    readStringField(tool || {}, 'callID', 'callId') ||
+    readStringField(props, 'id', 'requestID', 'requestId') ||
     `question-${messageId}`;
 
   await armPendingQuestionPrompt({
@@ -199,8 +318,18 @@ export async function handlePermissionUpdatedEvent(
   warnRouteMissOnce: (eventType: string, sessionId: string, messageId?: string) => void
 ) {
   const permission = (event.properties || {}) as Record<string, unknown>;
-  const sessionId = readStringField(permission, 'sessionID');
-  const permissionID = readStringField(permission, 'id', 'permissionID', 'requestID');
+  const sessionId = readStringField(permission, 'sessionID', 'sessionId');
+  if (sessionId) {
+    hydrateSessionRouteFromEventProps(sessionId, permission, deps);
+  }
+  const permissionID = readStringField(
+    permission,
+    'id',
+    'permissionID',
+    'permissionId',
+    'requestID',
+    'requestId',
+  );
   const permissionType = readStringField(permission, 'type', 'permission');
   const permissionTitle = readStringField(permission, 'title') || permissionType || '权限请求';
   const permissionPattern =
@@ -210,9 +339,49 @@ export async function handlePermissionUpdatedEvent(
     permission.tool && typeof permission.tool === 'object'
       ? (permission.tool as Record<string, unknown>)
       : undefined;
-  const callID = readStringField(permission, 'callID') || readStringField(tool || {}, 'callID');
+  const callID =
+    readStringField(permission, 'callID', 'callId') || readStringField(tool || {}, 'callID', 'callId');
 
-  if (!sessionId || !permissionID) return;
+  if (!sessionId) return;
+  if (!permissionID) {
+    bridgeLogger.warn(
+      `[BridgePermission] missing permissionID sid=${sessionId} type=${permissionType || '-'} title=${(permissionTitle || '').slice(0, 160)}`,
+    );
+    const route = getCacheKeyBySession(sessionId, deps);
+    if (!route) {
+      warnRouteMissOnce((event.type as string) || 'permission.updated', sessionId);
+      return;
+    }
+    const { cacheKey, adapterKey, chatId } = route;
+    const adapter = mux.get(adapterKey);
+    if (!adapter) return;
+    const ctx = deps.sessionToCtx.get(sessionId);
+    if (!ctx) return;
+
+    clearPendingAuthorizationForChat(deps, cacheKey);
+    const pending: PendingAuthorizationState = {
+      mode: 'session_blocked',
+      key: cacheKey,
+      adapterKey,
+      chatId,
+      senderId: ctx.senderId,
+      sessionId,
+      blockedReason: permissionTitle || permissionType || '需要网页侧授权',
+      source: 'bridge.incoming',
+      createdAt: Date.now(),
+      dueAt: Date.now() + AUTH_TIMEOUT_MS,
+    };
+    deps.chatPendingAuthorization.set(cacheKey, pending);
+    const timer = setTimeout(async () => {
+      const current = deps.chatPendingAuthorization.get(cacheKey);
+      if (!current || current.sessionId !== sessionId || current.mode !== 'session_blocked') return;
+      clearPendingAuthorizationForChat(deps, cacheKey);
+      await adapter.sendMessage(chatId, '## Status\n⏰ 授权等待已超时。').catch(() => {});
+    }, AUTH_TIMEOUT_MS);
+    deps.pendingAuthorizationTimers.set(cacheKey, timer);
+    await adapter.sendMessage(chatId, renderAuthorizationPrompt(pending)).catch(() => {});
+    return;
+  }
   if (shouldSkipDuplicatePermissionEvent('request', sessionId, permissionID)) {
     bridgeLogger.debug(
       `[BridgePermission] dedupe skip request sid=${sessionId} permissionID=${permissionID}`
@@ -316,9 +485,15 @@ export async function handlePermissionRepliedEvent(
   deps: EventFlowDeps
 ) {
   const props = (event.properties || {}) as Record<string, unknown>;
-  const sessionId = readStringField(props, 'sessionID');
+  const sessionId = readStringField(props, 'sessionID', 'sessionId');
   if (!sessionId) return;
-  const permissionID = readStringField(props, 'permissionID', 'requestID') || '';
+  const permissionID = readStringField(
+    props,
+    'permissionID',
+    'permissionId',
+    'requestID',
+    'requestId',
+  ) || '';
   const response = readStringField(props, 'response', 'reply') || '-';
   if (permissionID && shouldSkipDuplicatePermissionEvent('reply', sessionId, permissionID)) {
     bridgeLogger.debug(
@@ -367,8 +542,8 @@ export async function handleQuestionRepliedEvent(
   deps: EventFlowDeps
 ) {
   const props = (event.properties || {}) as Record<string, unknown>;
-  const sessionId = readStringField(props, 'sessionID');
-  const requestId = readStringField(props, 'requestID');
+  const sessionId = readStringField(props, 'sessionID', 'sessionId');
+  const requestId = readStringField(props, 'requestID', 'requestId');
   if (!sessionId) return;
 
   const hit = findPendingQuestionBySession(deps, sessionId, requestId);
@@ -388,8 +563,8 @@ export async function handleQuestionRejectedEvent(
   deps: EventFlowDeps
 ) {
   const props = (event.properties || {}) as Record<string, unknown>;
-  const sessionId = readStringField(props, 'sessionID');
-  const requestId = readStringField(props, 'requestID');
+  const sessionId = readStringField(props, 'sessionID', 'sessionId');
+  const requestId = readStringField(props, 'requestID', 'requestId');
   if (!sessionId) return;
 
   const hit = findPendingQuestionBySession(deps, sessionId, requestId);
