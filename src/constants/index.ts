@@ -11,6 +11,7 @@ export const LOADING_EMOJI = 'Typing';
 
 export const UPDATE_INTERVAL = 900;
 export const TELEGRAM_UPDATE_INTERVAL = 250;
+export const LARK_UPDATE_INTERVAL = 1800;
 
 export const MAX_REASONING_CHARS = 4000;
 export const MAX_TEXT_CHARS = 16000;

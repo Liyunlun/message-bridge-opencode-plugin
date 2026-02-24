@@ -27,15 +27,6 @@ export async function startGlobalEventListenerWithDeps(
 
   let retryCount = 0;
   let globalRetryCount = 0;
-  const GLOBAL_FORWARD_EVENT_TYPES = new Set<string>([
-    'permission.updated',
-    'permission.asked',
-    'permission.replied',
-    'question.asked',
-    'question.replied',
-    'question.rejected',
-  ]);
-
   const connect = async () => {
     try {
       const events = await api.event.subscribe();
@@ -77,7 +68,7 @@ export async function startGlobalEventListenerWithDeps(
         const e = unwrapObservedEvent(event);
         if (deps.listenerState.shouldStopListener) break;
         if (!e) continue;
-        if (!GLOBAL_FORWARD_EVENT_TYPES.has(e.type)) continue;
+        bridgeLogger.info('[BridgeFlow] global.event.observed', summarizeObservedEvent(e));
         await dispatchEventByType(e, api, mux, deps);
       }
     } catch (e) {
@@ -91,6 +82,21 @@ export async function startGlobalEventListenerWithDeps(
 
   connect();
   connectGlobalPermissions();
+}
+
+export async function handleObservedEventWithDeps(
+  event: unknown,
+  api: OpencodeClient,
+  mux: AdapterMux,
+  deps: EventFlowDeps,
+) {
+  const e = unwrapObservedEvent(event);
+  if (!e) {
+    bridgeLogger.debug('[BridgeFlow] event.observed.unparsed', event);
+    return;
+  }
+  bridgeLogger.info('[BridgeFlow] hook.event.observed', summarizeObservedEvent(e));
+  await dispatchEventByType(e, api, mux, deps);
 }
 
 export function stopGlobalEventListenerWithDeps(deps: EventFlowDeps) {

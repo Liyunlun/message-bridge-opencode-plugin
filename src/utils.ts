@@ -2,8 +2,10 @@
 import { Config } from '@opencode-ai/sdk';
 import type { BridgeGlobalState } from './global.state';
 import {
+  AGENT_LARK,
   AGENT_TELEGRAM,
   BRIDGE_AGENT_IDS,
+  LARK_UPDATE_INTERVAL,
   TELEGRAM_UPDATE_INTERVAL,
   UPDATE_INTERVAL,
 } from './constants';
@@ -49,6 +51,7 @@ export function asRecord(value: unknown): Record<string, unknown> {
 
 export function getUpdateIntervalByAdapter(adapterKey?: string): number {
   if (adapterKey === AGENT_TELEGRAM) return TELEGRAM_UPDATE_INTERVAL;
+  if (adapterKey === AGENT_LARK) return LARK_UPDATE_INTERVAL;
   return UPDATE_INTERVAL;
 }
 

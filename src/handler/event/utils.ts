@@ -11,6 +11,7 @@ export const KNOWN_EVENT_TYPES = new Set<string>([
   'message.updated',
   'message.removed',
   'message.part.updated',
+  'message.part.delta',
   'message.part.removed',
   'permission.updated',
   'permission.replied',
@@ -69,11 +70,63 @@ export function readStringField(obj: Record<string, unknown>, ...keys: string[])
 }
 
 export function unwrapObservedEvent(event: unknown): EventWithType | null {
-  const direct = event as { type?: unknown; properties?: unknown; payload?: unknown } | null;
-  if (direct && typeof direct.type === 'string') return direct as EventWithType;
+  const direct = event as
+    | {
+        type?: unknown;
+        event?: unknown;
+        properties?: unknown;
+        payload?: unknown;
+        data?: unknown;
+      }
+    | null;
+  if (!direct || typeof direct !== 'object') return null;
 
-  const nested = direct?.payload as { type?: unknown; properties?: unknown } | null;
-  if (nested && typeof nested.type === 'string') return nested as EventWithType;
+  if (typeof direct.type === 'string') {
+    return direct as EventWithType;
+  }
+
+  const fromPayload = direct.payload as
+    | { type?: unknown; properties?: unknown; payload?: unknown; data?: unknown }
+    | null;
+  if (fromPayload && typeof fromPayload.type === 'string') {
+    return fromPayload as EventWithType;
+  }
+
+  const fromData = direct.data as
+    | { type?: unknown; properties?: unknown; payload?: unknown; data?: unknown }
+    | null;
+  if (fromData && typeof fromData.type === 'string') {
+    return fromData as EventWithType;
+  }
+
+  const eventName = typeof direct.event === 'string' ? direct.event : undefined;
+  if (eventName) {
+    if (direct.data && typeof direct.data === 'object') {
+      const dataObj = direct.data as Record<string, unknown>;
+      if (typeof dataObj.type === 'string') {
+        return dataObj as EventWithType;
+      }
+      const dataProps =
+        dataObj.properties && typeof dataObj.properties === 'object' ? dataObj.properties : dataObj;
+      return { type: eventName, properties: dataProps };
+    }
+
+    if (direct.payload && typeof direct.payload === 'object') {
+      const payloadObj = direct.payload as Record<string, unknown>;
+      if (typeof payloadObj.type === 'string') {
+        return payloadObj as EventWithType;
+      }
+      const payloadProps =
+        payloadObj.properties && typeof payloadObj.properties === 'object'
+          ? payloadObj.properties
+          : payloadObj;
+      return { type: eventName, properties: payloadProps };
+    }
+
+    if (direct.properties && typeof direct.properties === 'object') {
+      return { type: eventName, properties: direct.properties };
+    }
+  }
 
   return null;
 }
@@ -89,17 +142,26 @@ export function summarizeObservedEvent(event: unknown): Record<string, unknown> 
     props.part && typeof props.part === 'object'
       ? (props.part as Record<string, unknown>)
       : undefined;
+  const eventName = (event as { event?: unknown })?.event;
 
   return {
-    type: typeof e?.type === 'string' ? e.type : 'unknown',
+    type:
+      typeof e?.type === 'string'
+        ? e.type
+        : typeof eventName === 'string'
+          ? eventName
+          : 'unknown',
     session_id:
       readStringField(props, 'sessionID') ??
       readStringField(info ?? {}, 'sessionID') ??
       readStringField(part ?? {}, 'sessionID'),
-    message_id: readStringField(info ?? {}, 'id') ?? readStringField(part ?? {}, 'messageID'),
+    message_id:
+      readStringField(info ?? {}, 'id') ??
+      readStringField(props, 'messageID') ??
+      readStringField(part ?? {}, 'messageID'),
     role: readStringField(info ?? {}, 'role'),
-    part_type: readStringField(part ?? {}, 'type'),
-    part_id: readStringField(part ?? {}, 'id'),
+    part_type: readStringField(part ?? {}, 'type') ?? readStringField(props, 'field'),
+    part_id: readStringField(part ?? {}, 'id') ?? readStringField(props, 'partID'),
     has_delta: typeof props.delta === 'string' && props.delta.length > 0,
     has_part_metadata:
       !!part &&

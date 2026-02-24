@@ -4,7 +4,11 @@ import { LRUCache } from 'lru-cache';
 import type { MessageBuffer } from '../bridge/buffer';
 import { AdapterMux } from './mux';
 import { createIncomingHandlerWithDeps } from './flow';
-import { startGlobalEventListenerWithDeps, stopGlobalEventListenerWithDeps } from './event';
+import {
+  handleObservedEventWithDeps,
+  startGlobalEventListenerWithDeps,
+  stopGlobalEventListenerWithDeps,
+} from './event';
 import { globalState } from '../utils';
 import type { PendingAuthorizationState, PendingQuestionState } from './proxy';
 import { extractErrorMessage } from './shared';
@@ -180,3 +184,28 @@ export const createIncomingHandler = (api: OpencodeClient, mux: AdapterMux, adap
     clearAllPendingQuestions,
     formatUserError,
   });
+
+export async function handlePluginEvent(api: OpencodeClient, mux: AdapterMux, event: unknown) {
+  await handleObservedEventWithDeps(event, api, mux, {
+    listenerState,
+    sessionToCtx,
+    sessionActiveMsg,
+    msgRole,
+    msgBuffers,
+    sessionCache,
+    sessionToAdapterKey,
+    chatAgent,
+    chatModel,
+    chatSessionList,
+    chatAgentList,
+    chatAwaitingSaveFile,
+    chatMaxFileSizeMb,
+    chatMaxFileRetry,
+    chatPendingQuestion,
+    chatPendingAuthorization,
+    pendingQuestionTimers,
+    pendingAuthorizationTimers,
+    isQuestionCallHandled,
+    markQuestionCallHandled,
+  });
+}

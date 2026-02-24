@@ -6,7 +6,7 @@ import { AGENT_LARK, AGENT_IMESSAGE, AGENT_TELEGRAM, AGENT_QQ } from './src/cons
 import { bridgeLogger, getBridgeLogFilePath } from './src/logger';
 
 import { AdapterMux } from './src/handler/mux';
-import { startGlobalEventListener, createIncomingHandler } from './src/handler';
+import { createIncomingHandler, handlePluginEvent, startGlobalEventListener } from './src/handler';
 import { setBridgeFileStoreDir } from './src/bridge/file.store';
 
 import { FeishuAdapter } from './src/feishu/feishu.adapter';
@@ -132,5 +132,15 @@ export const BridgePlugin: Plugin = async ctx => {
   };
 
   bootstrap();
-  return {};
+  return {
+    event: async ({ event }) => {
+      const mux = globalState.__bridge_mux;
+      if (!mux) return;
+      try {
+        await handlePluginEvent(client, mux, event);
+      } catch (err) {
+        bridgeLogger.error('[Plugin] hook event dispatch failed', err);
+      }
+    },
+  };
 };

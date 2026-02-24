@@ -140,3 +140,6 @@ vite.config.ts.timestamp-*
 
 bridge_files
 bridge_files/*
+
+# Local temporary lockfile from npm install
+package-lock.json

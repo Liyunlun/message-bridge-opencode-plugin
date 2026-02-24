@@ -5,11 +5,27 @@ import { sleep } from '../../utils';
 import { bridgeLogger } from '../../logger';
 
 type SessionContext = { chatId: string; senderId: string };
+const inFlightEdits = new Set<string>();
 
 function getEditRetryDelay(adapter: BridgeAdapter): number {
   const provider = (adapter as { provider?: string }).provider;
   if (provider === 'telegram') return 60;
   return 500;
+}
+
+function getEditMinInterval(adapter: BridgeAdapter): number {
+  const provider = (adapter as { provider?: string }).provider;
+  if (provider === 'feishu' || provider === 'lark') return 2500;
+  if (provider === 'telegram') return 120;
+  return 500;
+}
+
+function shouldFallbackToNewMessageOnEditFailure(adapter: BridgeAdapter): boolean {
+  const provider = (adapter as { provider?: string }).provider;
+  // Feishu/Lark has strict per-message update rate limits.
+  // Falling back to sendMessage on edit failure floods new messages.
+  if (provider === 'feishu' || provider === 'lark') return false;
+  return true;
 }
 
 export async function safeEditWithRetry(
@@ -46,6 +62,13 @@ export async function safeEditWithRetry(
     `[BridgeFlowDebug] edit failed retry chat=${chatId} msg=${platformMsgId} fallback=sendMessage contentLen=${content.length}`,
   );
 
+  if (!shouldFallbackToNewMessageOnEditFailure(adapter)) {
+    bridgeLogger.warn(
+      `[BridgeFlowDebug] edit fallback disabled chat=${chatId} msg=${platformMsgId} provider=feishu`,
+    );
+    return null;
+  }
+
   // Fallback for platforms that don't support edit semantics well.
   const sent = await adapter.sendMessage(chatId, content);
   if (sent) {
@@ -72,14 +95,42 @@ export async function flushMessage(params: {
   if (!content.trim()) return;
 
   const hash = simpleHash(content);
-  if (!force && hash === buffer.lastDisplayHash) return;
+  if (hash === buffer.lastDisplayHash) return;
 
-  const msgId = await safeEditWithRetry(adapter, chatId, buffer.platformMsgId, content).catch(
-    () => null,
-  );
-  if (msgId) {
-    buffer.platformMsgId = msgId;
-    buffer.lastDisplayHash = hash;
+  const now = Date.now();
+  const minInterval = getEditMinInterval(adapter);
+  if (buffer.lastUpdateTime > 0 && now - buffer.lastUpdateTime < minInterval) {
+    bridgeLogger.debug(
+      `[BridgeFlowDebug] skip-edit-throttle chat=${chatId} msg=${buffer.platformMsgId} waitMs=${
+        minInterval - (now - buffer.lastUpdateTime)
+      } force=${force}`,
+    );
+    return;
+  }
+
+  const editKey = `${chatId}:${buffer.platformMsgId}`;
+  if (inFlightEdits.has(editKey)) {
+    bridgeLogger.debug(
+      `[BridgeFlowDebug] skip-edit-inflight chat=${chatId} msg=${buffer.platformMsgId}`,
+    );
+    return;
+  }
+
+  // Count every edit attempt for throttling, even if provider rejects it.
+  buffer.lastUpdateTime = now;
+  inFlightEdits.add(editKey);
+
+  try {
+    const msgId = await safeEditWithRetry(adapter, chatId, buffer.platformMsgId, content).catch(
+      () => null,
+    );
+    if (msgId) {
+      buffer.platformMsgId = msgId;
+      buffer.lastDisplayHash = hash;
+      buffer.lastUpdateTime = Date.now();
+    }
+  } finally {
+    inFlightEdits.delete(editKey);
   }
 }
 

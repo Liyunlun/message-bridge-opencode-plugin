@@ -53,6 +53,8 @@ const FEISHU_RESPONSE_TIMEOUT_MS = (() => {
   return Number.isFinite(raw) && raw > 0 ? raw : BRIDGE_FEISHU_RESPONSE_TIMEOUT_MS;
 })();
 
+const FEISHU_RATE_LIMIT_BACKOFF_MS = 3000;
+
 function isUnresolvedVariableError(payload: unknown): boolean {
   const stack: unknown[] = [payload];
   while (stack.length > 0) {
@@ -109,6 +111,36 @@ function isNotCardMessageError(payload: unknown): boolean {
       const code = rec.code;
       if (code === 230001) return true;
 
+      for (const v of Object.values(rec)) stack.push(v);
+      continue;
+    }
+  }
+
+  return false;
+}
+
+function isRateLimitError(payload: unknown): boolean {
+  const stack: unknown[] = [payload];
+  while (stack.length > 0) {
+    const cur = stack.pop();
+    if (cur == null) continue;
+
+    if (typeof cur === 'string') {
+      if (/rate limit|too frequently|errcode:\s*230020|230020/i.test(cur)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (Array.isArray(cur)) {
+      for (const v of cur) stack.push(v);
+      continue;
+    }
+
+    if (typeof cur === 'object') {
+      const rec = cur as Record<string, unknown>;
+      const code = rec.code;
+      if (code === 230020) return true;
       for (const v of Object.values(rec)) stack.push(v);
       continue;
     }
@@ -195,6 +227,7 @@ export class FeishuClient {
   private tenantToken?: string;
   private tenantTokenExpiresAt?: number;
   private refreshTenantTokenPromise?: Promise<string>;
+  private rateLimitUntilByChat: Map<string, number> = new Map();
 
   constructor(config: FeishuConfig) {
     this.config = config;
@@ -921,49 +954,64 @@ export class FeishuClient {
   }
 
   async sendMessage(chatId: string, text: string): Promise<string | null> {
-    try {
-      const isCard = looksLikeJsonCard(text);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await this.waitForRateLimit(chatId, 'send');
+      try {
+        const isCard = looksLikeJsonCard(text);
 
-      const finalContent = isCard ? text : this.makeCard(text);
+        const finalContent = isCard ? text : this.makeCard(text);
 
-      const res = await this.withResponseTimeout(
-        this.runWithTenantRetry(options =>
-          this.apiClient.im.message.create(
-            {
-              params: { receive_id_type: 'chat_id' },
-              data: {
-                receive_id: chatId,
-                msg_type: 'interactive', // 永远使用 interactive
-                content: finalContent,
+        const res = await this.withResponseTimeout(
+          this.runWithTenantRetry(options =>
+            this.apiClient.im.message.create(
+              {
+                params: { receive_id_type: 'chat_id' },
+                data: {
+                  receive_id: chatId,
+                  msg_type: 'interactive', // 永远使用 interactive
+                  content: finalContent,
+                },
               },
-            },
-            options,
+              options,
+            ),
           ),
-        ),
-        'sendMessage(interactive)',
-      );
-      if (res.code === 0 && res.data?.message_id) return res.data.message_id;
-      if (isUnresolvedVariableError(res)) {
-        bridgeLogger.warn(
-          '[Feishu] ⚠️ Card contains unresolved variable (201008), fallback to text message',
+          'sendMessage(interactive)',
         );
-        return await this.sendTextMessage(chatId, text);
+        if (res.code === 0 && res.data?.message_id) return res.data.message_id;
+        if (isRateLimitError(res) && attempt === 0) {
+          this.markRateLimited(chatId, 'send');
+          bridgeLogger.warn('[Feishu] ⏳ send rate-limited, backing off and retrying once');
+          continue;
+        }
+        if (isUnresolvedVariableError(res)) {
+          bridgeLogger.warn(
+            '[Feishu] ⚠️ Card contains unresolved variable (201008), fallback to text message',
+          );
+          return await this.sendTextMessage(chatId, text);
+        }
+        bridgeLogger.error('[Feishu] ❌ Send failed:', res);
+        return null;
+      } catch (e) {
+        if (isRateLimitError(e) && attempt === 0) {
+          this.markRateLimited(chatId, 'send');
+          bridgeLogger.warn('[Feishu] ⏳ send rate-limited(error), backing off and retrying once');
+          continue;
+        }
+        if (isUnresolvedVariableError(e)) {
+          bridgeLogger.warn(
+            '[Feishu] ⚠️ Card contains unresolved variable (201008), fallback to text message',
+          );
+          return await this.sendTextMessage(chatId, text);
+        }
+        bridgeLogger.error('[Feishu] ❌ Failed to send:', e);
+        return null;
       }
-      bridgeLogger.error('[Feishu] ❌ Send failed:', res);
-      return null;
-    } catch (e) {
-      if (isUnresolvedVariableError(e)) {
-        bridgeLogger.warn(
-          '[Feishu] ⚠️ Card contains unresolved variable (201008), fallback to text message',
-        );
-        return await this.sendTextMessage(chatId, text);
-      }
-      bridgeLogger.error('[Feishu] ❌ Failed to send:', e);
-      return null;
     }
+    return null;
   }
 
   async editMessage(chatId: string, messageId: string, text: string): Promise<boolean> {
+    await this.waitForRateLimit(chatId, 'edit');
     try {
       const res = await this.withResponseTimeout(
         this.runWithTenantRetry(options =>
@@ -994,8 +1042,23 @@ export class FeishuClient {
         return await this.patchTextMessage(messageId, text);
       }
 
+      if (res.code !== 0 && isRateLimitError(res)) {
+        this.markRateLimited(chatId, 'edit');
+        bridgeLogger.warn(
+          `[Feishu] ⏳ edit rate-limited, skip update msg=${messageId}`,
+        );
+        return false;
+      }
+
       return res.code === 0;
     } catch (e) {
+      if (isRateLimitError(e)) {
+        this.markRateLimited(chatId, 'edit');
+        bridgeLogger.warn(
+          `[Feishu] ⏳ edit rate-limited(error), skip update msg=${messageId}`,
+        );
+        return false;
+      }
       if (isUnresolvedVariableError(e)) {
         bridgeLogger.warn(
           `[Feishu] ⚠️ Card edit unresolved variable (201008), fallback to sendMessage msg=${messageId}`,
@@ -1012,6 +1075,24 @@ export class FeishuClient {
         `[Feishu] ⚠️ editMessage failed: msg=${messageId} reason=${getErrorMessage(e) || 'unknown'}`,
       );
       return false;
+    }
+  }
+
+  private markRateLimited(chatId: string, op: 'send' | 'edit') {
+    const base = op === 'edit' ? FEISHU_RATE_LIMIT_BACKOFF_MS : 2000;
+    const until = Date.now() + base;
+    const existing = this.rateLimitUntilByChat.get(chatId) || 0;
+    if (until > existing) {
+      this.rateLimitUntilByChat.set(chatId, until);
+    }
+  }
+
+  private async waitForRateLimit(chatId: string, op: 'send' | 'edit') {
+    const until = this.rateLimitUntilByChat.get(chatId) || 0;
+    const waitMs = until - Date.now();
+    if (waitMs > 0) {
+      bridgeLogger.debug(`[Feishu] wait rate-limit op=${op} chat=${chatId} waitMs=${waitMs}`);
+      await sleep(waitMs);
     }
   }
 

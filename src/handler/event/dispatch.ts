@@ -50,14 +50,29 @@ import {
   handleQuestionRepliedEvent,
   resetInteractionState,
 } from './interaction';
+import { AGENT_LARK } from '../../constants';
 import type { EventFlowDeps, EventMessageBuffer } from './types';
 export type { EventFlowDeps } from './types';
 
 const ROUTE_MISS_WARN_INTERVAL_MS = 30_000;
 const MAX_ACTIVE_MESSAGE_BUFFERS = 600;
 const BUFFER_SWEEP_BATCH_SIZE = 120;
+const CREATE_MSG_RETRY_BACKOFF_MS = 1500;
+const FINAL_OVERWRITE_DELAY_MS = 2200;
 const lastRouteMissWarnAt = new LRUCache<string, number>({ max: 4000, ttl: 10 * 60 * 1000 });
 const forwardedSchedulerUserParts = new LRUCache<string, true>({ max: 8000, ttl: 20 * 60 * 1000 });
+const creatingPlatformMessage = new Set<string>();
+const createMessageRetryAfter = new LRUCache<string, number>({ max: 8000, ttl: 10 * 60 * 1000 });
+const recentPartEventFingerprints = new LRUCache<string, true>({ max: 20000, ttl: 8000 });
+const finalOverwriteTimers = new Map<string, NodeJS.Timeout>();
+
+function markPartEventDuplicate(fingerprint: string): boolean {
+  if (recentPartEventFingerprints.get(fingerprint)) {
+    return true;
+  }
+  recentPartEventFingerprints.set(fingerprint, true);
+  return false;
+}
 
 function clearAllPendingQuestions(deps: EventFlowDeps) {
   for (const timer of deps.pendingQuestionTimers.values()) {
@@ -369,7 +384,12 @@ async function handleMessagePartUpdatedEvent(
   if (prev && prev !== messageId) {
     const prevBuf = deps.msgBuffers.get(prev);
     const nextBuf = getOrInitBuffer(deps.msgBuffers, messageId);
-    if (prevBuf && shouldCarryPlatformMessageAcrossAssistantMessages(prevBuf)) {
+    const forceCarryForLark =
+      adapterKey === AGENT_LARK && prevBuf?.status === 'streaming';
+    if (
+      prevBuf &&
+      (forceCarryForLark || shouldCarryPlatformMessageAcrossAssistantMessages(prevBuf))
+    ) {
       carryPlatformMessage(prevBuf, nextBuf);
       bridgeLogger.info(
         `${FLOW_LOG_PREFIX} carry-execution sid=${sessionId} prev=${prev} next=${messageId}`
@@ -420,7 +440,8 @@ async function handleMessagePartUpdatedEvent(
     } note="${buffer.statusNote || ''}" hasPlatform=${!!buffer.platformMsgId}`
   );
 
-  if (shouldSplitOutFinalAnswer(buffer)) {
+  const allowSplitFinalAnswer = adapterKey !== AGENT_LARK;
+  if (allowSplitFinalAnswer && shouldSplitOutFinalAnswer(buffer)) {
     bridgeLogger.info(
       `${FLOW_LOG_PREFIX} split-final-answer sid=${sessionId} mid=${messageId} textLen=${buffer.text.length}`
     );
@@ -459,13 +480,34 @@ async function handleMessagePartUpdatedEvent(
   }
 
   if (!buffer.platformMsgId) {
+    const now = Date.now();
+    const retryAfter = createMessageRetryAfter.get(messageId) || 0;
+    if (retryAfter > now) {
+      bridgeLogger.debug(
+        `[BridgeFlowDebug] skip-create sid=${sessionId} mid=${messageId} waitMs=${retryAfter - now}`
+      );
+      return;
+    }
+    if (creatingPlatformMessage.has(messageId)) {
+      bridgeLogger.debug(`[BridgeFlowDebug] skip-create sid=${sessionId} mid=${messageId} reason=in-flight`);
+      return;
+    }
+
+    creatingPlatformMessage.add(messageId);
     bridgeLogger.info(
       `${FLOW_LOG_PREFIX} send-new sid=${sessionId} mid=${messageId} tools=${buffer.tools.size}`
     );
-    const sent = await adapter.sendMessage(ctx.chatId, display);
-    if (sent) {
-      buffer.platformMsgId = sent;
-      buffer.lastDisplayHash = hash;
+    try {
+      const sent = await adapter.sendMessage(ctx.chatId, display);
+      if (sent) {
+        buffer.platformMsgId = sent;
+        buffer.lastDisplayHash = hash;
+        createMessageRetryAfter.delete(messageId);
+      } else {
+        createMessageRetryAfter.set(messageId, Date.now() + CREATE_MSG_RETRY_BACKOFF_MS);
+      }
+    } finally {
+      creatingPlatformMessage.delete(messageId);
     }
     return;
   }
@@ -502,6 +544,12 @@ async function handleSessionErrorEvent(
   const mid = deps.sessionActiveMsg.get(sid);
   if (!mid) return;
 
+  const pendingFinalTimer = finalOverwriteTimers.get(sid);
+  if (pendingFinalTimer) {
+    clearTimeout(pendingFinalTimer);
+    finalOverwriteTimers.delete(sid);
+  }
+
   if (isAbortedError(err)) {
     markStatus(deps.msgBuffers, mid, 'aborted', extractErrorMessage(err) || 'aborted');
   } else {
@@ -537,6 +585,12 @@ async function handleSessionIdleEvent(
   const mid = deps.sessionActiveMsg.get(sid);
   if (!mid) return;
 
+  const pendingFinalTimer = finalOverwriteTimers.get(sid);
+  if (pendingFinalTimer) {
+    clearTimeout(pendingFinalTimer);
+    finalOverwriteTimers.delete(sid);
+  }
+
   const buf = deps.msgBuffers.get(mid);
   if (buf && (buf.status === 'aborted' || buf.status === 'error')) {
     await flushMessage(adapter, ctx.chatId, mid, deps.msgBuffers, true);
@@ -545,6 +599,14 @@ async function handleSessionIdleEvent(
   }
   markStatus(deps.msgBuffers, mid, 'done', 'idle');
   await flushMessage(adapter, ctx.chatId, mid, deps.msgBuffers, true);
+  const adapterKey = deps.sessionToAdapterKey.get(sid);
+  if (adapterKey === AGENT_LARK) {
+    const timer = setTimeout(() => {
+      void flushMessage(adapter, ctx.chatId, mid, deps.msgBuffers, true).catch(() => {});
+      finalOverwriteTimers.delete(sid);
+    }, FINAL_OVERWRITE_DELAY_MS);
+    finalOverwriteTimers.set(sid, timer);
+  }
   pruneMessageBuffers(deps);
 }
 
@@ -618,10 +680,65 @@ export async function dispatchEventByType(
   if (e.type === 'message.part.updated') {
     const pe = e as EventMessagePartUpdated;
     const p = pe.properties.part;
+    const deltaText = typeof pe.properties.delta === 'string' ? pe.properties.delta : '';
+    const partSnapshot = JSON.stringify(p);
+    const dedupeKey = `upd:${p.sessionID}:${p.messageID}:${p.id}:${p.type}:${simpleHash(
+      `${deltaText}\n${partSnapshot}`,
+    )}`;
+    if (markPartEventDuplicate(dedupeKey)) {
+      bridgeLogger.debug(
+        `[BridgeFlowDebug] skip duplicate part.updated sid=${p.sessionID} mid=${p.messageID} pid=${p.id}`,
+      );
+      return;
+    }
     bridgeLogger.debug(
       `[BridgeFlowDebug] part.updated sid=${p.sessionID} mid=${p.messageID} type=${p.type} deltaLen=${(pe.properties.delta || '').length}`
     );
     await handleMessagePartUpdatedEvent(pe, api, mux, deps);
+    return;
+  }
+
+  if (e.type === 'message.part.delta') {
+    const props = (e.properties || {}) as Record<string, unknown>;
+    const sessionID = readStringField(props, 'sessionID');
+    const messageID = readStringField(props, 'messageID');
+    const partID = readStringField(props, 'partID') || `delta-${Date.now()}`;
+    const field = readStringField(props, 'field');
+    const delta = typeof props.delta === 'string' ? props.delta : '';
+
+    if (!sessionID || !messageID) {
+      bridgeLogger.debug('[BridgeFlowDebug] part.delta skip missing ids', props);
+      return;
+    }
+    const dedupeKey = `delta:${sessionID}:${messageID}:${partID}:${field || '-'}:${simpleHash(delta)}`;
+    if (markPartEventDuplicate(dedupeKey)) {
+      bridgeLogger.debug(
+        `[BridgeFlowDebug] skip duplicate part.delta sid=${sessionID} mid=${messageID} pid=${partID}`,
+      );
+      return;
+    }
+
+    const syntheticType = field === 'reasoning' ? 'reasoning' : 'text';
+    const synthetic = {
+      type: 'message.part.updated',
+      properties: {
+        part: {
+          id: partID,
+          sessionID,
+          messageID,
+          type: syntheticType,
+          text: '',
+        },
+        delta,
+      },
+    } as unknown as EventMessagePartUpdated;
+
+    bridgeLogger.debug(
+      `[BridgeFlowDebug] part.delta sid=${sessionID} mid=${messageID} pid=${partID} field=${
+        field || '-'
+      } deltaLen=${delta.length}`,
+    );
+    await handleMessagePartUpdatedEvent(synthetic, api, mux, deps);
     return;
   }
 
@@ -707,5 +824,9 @@ export function resetEventDispatchState(deps: EventFlowDeps) {
   clearAllPendingAuthorizations(deps);
   lastRouteMissWarnAt.clear();
   forwardedSchedulerUserParts.clear();
+  for (const timer of finalOverwriteTimers.values()) {
+    clearTimeout(timer);
+  }
+  finalOverwriteTimers.clear();
   resetInteractionState();
 }
