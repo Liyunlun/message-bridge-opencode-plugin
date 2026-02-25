@@ -7,6 +7,7 @@ import * as path from 'path';
 import * as https from 'https';
 import * as fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { LRUCache } from 'lru-cache';
 
 import type { FeishuConfig, IncomingMessageHandler } from '../types';
 import type { FilePartInput } from '@opencode-ai/sdk';
@@ -54,6 +55,26 @@ const FEISHU_RESPONSE_TIMEOUT_MS = (() => {
 })();
 
 const FEISHU_RATE_LIMIT_BACKOFF_MS = 3000;
+const FEISHU_SAFE_TEXT_MAX_CHARS = 3500;
+const FEISHU_TEXT_CHUNK_MAX_BYTES = 900;
+
+function clipUtf8Bytes(input: string, maxBytes: number): string {
+  if (Buffer.byteLength(input, 'utf8') <= maxBytes) return input;
+  let lo = 0;
+  let hi = input.length;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const candidate = input.slice(0, mid);
+    if (Buffer.byteLength(candidate, 'utf8') <= maxBytes) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return input.slice(0, best);
+}
 
 function isUnresolvedVariableError(payload: unknown): boolean {
   const stack: unknown[] = [payload];
@@ -119,6 +140,35 @@ function isNotCardMessageError(payload: unknown): boolean {
   return false;
 }
 
+function isContentTooLongError(payload: unknown): boolean {
+  const stack: unknown[] = [payload];
+  while (stack.length > 0) {
+    const cur = stack.pop();
+    if (cur == null) continue;
+
+    if (typeof cur === 'string') {
+      if (/length of the message content reaches its limit|content.*limit|errcode:\s*230025|230025/i.test(cur)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (Array.isArray(cur)) {
+      for (const v of cur) stack.push(v);
+      continue;
+    }
+
+    if (typeof cur === 'object') {
+      const rec = cur as Record<string, unknown>;
+      if (rec.code === 230025) return true;
+      for (const v of Object.values(rec)) stack.push(v);
+      continue;
+    }
+  }
+
+  return false;
+}
+
 function isRateLimitError(payload: unknown): boolean {
   const stack: unknown[] = [payload];
   while (stack.length > 0) {
@@ -147,6 +197,46 @@ function isRateLimitError(payload: unknown): boolean {
   }
 
   return false;
+}
+
+function splitTextChunksByBytes(text: string, maxBytes: number): string[] {
+  const raw = (text || '').trim();
+  if (!raw) return [''];
+  if (Buffer.byteLength(raw, 'utf8') <= maxBytes) return [raw];
+
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < raw.length) {
+    let lo = start + 1;
+    let hi = raw.length;
+    let best = lo;
+
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const candidate = raw.slice(start, mid);
+      if (Buffer.byteLength(candidate, 'utf8') <= maxBytes) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+
+    if (best <= start) {
+      best = start + 1;
+    }
+    chunks.push(raw.slice(start, best));
+    start = best;
+  }
+  return chunks;
+}
+
+function hashText(input: string): string {
+  let h = 0;
+  for (let i = 0; i < input.length; i++) {
+    h = (h * 31 + input.charCodeAt(i)) >>> 0;
+  }
+  return String(h);
 }
 
 type MentionLike = { key?: string };
@@ -227,7 +317,14 @@ export class FeishuClient {
   private tenantToken?: string;
   private tenantTokenExpiresAt?: number;
   private refreshTenantTokenPromise?: Promise<string>;
-  private rateLimitUntilByChat: Map<string, number> = new Map();
+  private rateLimitUntilByChat = new LRUCache<string, number>({
+    max: 5000,
+    ttl: 10 * 60 * 1000,
+  });
+  private overflowMessageHashByMsg = new LRUCache<string, string>({
+    max: 10000,
+    ttl: 30 * 60 * 1000,
+  });
 
   constructor(config: FeishuConfig) {
     this.config = config;
@@ -886,32 +983,70 @@ export class FeishuClient {
     return text || raw;
   }
 
+  private buildSafeShortText(input: string): string {
+    const plain = this.extractPlainTextForFallback(input);
+    if (plain.length <= FEISHU_SAFE_TEXT_MAX_CHARS) return plain;
+    const suffix = '\n\n...（内容较长，已截断）';
+    const clipped = clipUtf8Bytes(plain, 1200);
+    return `${clipped}${suffix}`;
+  }
+
   private async sendTextMessage(chatId: string, text: string): Promise<string | null> {
     const fallbackText = this.extractPlainTextForFallback(text);
-    try {
-      const res = await this.withResponseTimeout(
-        this.runWithTenantRetry(options =>
-          this.apiClient.im.message.create(
-            {
-              params: { receive_id_type: 'chat_id' },
-              data: {
-                receive_id: chatId,
-                msg_type: 'text',
-                content: JSON.stringify({ text: fallbackText }),
-              },
-            },
-            options,
-          ),
-        ),
-        'sendMessage(text-fallback)',
-      );
-      if (res.code === 0 && res.data?.message_id) return res.data.message_id;
-      bridgeLogger.error('[Feishu] ❌ Text fallback send failed:', res);
-      return null;
-    } catch (e) {
-      bridgeLogger.error('[Feishu] ❌ Text fallback send failed:', e);
-      return null;
+    const chunks = splitTextChunksByBytes(fallbackText, FEISHU_TEXT_CHUNK_MAX_BYTES);
+    let firstMessageId: string | null = null;
+
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const prefix = idx === 0 ? '' : `（续 ${idx + 1}/${chunks.length}）\n`;
+      const part = `${prefix}${chunks[idx]}`;
+
+      let sent: string | null = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await this.waitForRateLimit(chatId, 'send');
+        try {
+          const res = await this.withResponseTimeout(
+            this.runWithTenantRetry(options =>
+              this.apiClient.im.message.create(
+                {
+                  params: { receive_id_type: 'chat_id' },
+                  data: {
+                    receive_id: chatId,
+                    msg_type: 'text',
+                    content: JSON.stringify({ text: part }),
+                  },
+                },
+                options,
+              ),
+            ),
+            'sendMessage(text-fallback)',
+          );
+          if (res.code === 0 && res.data?.message_id) {
+            sent = res.data.message_id;
+            break;
+          }
+          if (isRateLimitError(res) && attempt === 0) {
+            this.markRateLimited(chatId, 'send');
+            continue;
+          }
+          bridgeLogger.error('[Feishu] ❌ Text fallback send failed:', res);
+          break;
+        } catch (e) {
+          if (isRateLimitError(e) && attempt === 0) {
+            this.markRateLimited(chatId, 'send');
+            continue;
+          }
+          bridgeLogger.error('[Feishu] ❌ Text fallback send failed:', e);
+          break;
+        }
+      }
+
+      if (!sent) {
+        return firstMessageId;
+      }
+      if (!firstMessageId) firstMessageId = sent;
     }
+
+    return firstMessageId;
   }
 
   private async patchTextMessage(messageId: string, text: string): Promise<boolean> {
@@ -978,6 +1113,10 @@ export class FeishuClient {
           'sendMessage(interactive)',
         );
         if (res.code === 0 && res.data?.message_id) return res.data.message_id;
+        if (isContentTooLongError(res)) {
+          bridgeLogger.warn('[Feishu] ⚠️ message too long (230025), fallback to clipped text');
+          return await this.sendTextMessage(chatId, this.buildSafeShortText(text));
+        }
         if (isRateLimitError(res) && attempt === 0) {
           this.markRateLimited(chatId, 'send');
           bridgeLogger.warn('[Feishu] ⏳ send rate-limited, backing off and retrying once');
@@ -992,6 +1131,10 @@ export class FeishuClient {
         bridgeLogger.error('[Feishu] ❌ Send failed:', res);
         return null;
       } catch (e) {
+        if (isContentTooLongError(e)) {
+          bridgeLogger.warn('[Feishu] ⚠️ message too long (230025), fallback to clipped text');
+          return await this.sendTextMessage(chatId, this.buildSafeShortText(text));
+        }
         if (isRateLimitError(e) && attempt === 0) {
           this.markRateLimited(chatId, 'send');
           bridgeLogger.warn('[Feishu] ⏳ send rate-limited(error), backing off and retrying once');
@@ -1013,13 +1156,15 @@ export class FeishuClient {
   async editMessage(chatId: string, messageId: string, text: string): Promise<boolean> {
     await this.waitForRateLimit(chatId, 'edit');
     try {
+      const isCard = looksLikeJsonCard(text);
+      const finalContent = isCard ? text : this.makeCard(text);
       const res = await this.withResponseTimeout(
         this.runWithTenantRetry(options =>
           this.apiClient.im.message.patch(
             {
               path: { message_id: messageId },
               data: {
-                content: text,
+                content: finalContent,
               },
             },
             options,
@@ -1042,6 +1187,26 @@ export class FeishuClient {
         return await this.patchTextMessage(messageId, text);
       }
 
+      if (res.code !== 0 && isContentTooLongError(res)) {
+        bridgeLogger.warn(
+          `[Feishu] ⚠️ edit content too long (230025), fallback to chunked text patch msg=${messageId}`,
+        );
+        const plain = this.extractPlainTextForFallback(text);
+        const chunks = splitTextChunksByBytes(plain, FEISHU_TEXT_CHUNK_MAX_BYTES);
+        const ok = await this.patchTextMessage(messageId, chunks[0] || '');
+        if (!ok) return false;
+        if (chunks.length > 1) {
+          const fullHash = hashText(plain);
+          if (this.overflowMessageHashByMsg.get(messageId) !== fullHash) {
+            for (let i = 1; i < chunks.length; i++) {
+              await this.sendTextMessage(chatId, `（续 ${i + 1}/${chunks.length}）\n${chunks[i]}`);
+            }
+            this.overflowMessageHashByMsg.set(messageId, fullHash);
+          }
+        }
+        return true;
+      }
+
       if (res.code !== 0 && isRateLimitError(res)) {
         this.markRateLimited(chatId, 'edit');
         bridgeLogger.warn(
@@ -1052,6 +1217,25 @@ export class FeishuClient {
 
       return res.code === 0;
     } catch (e) {
+      if (isContentTooLongError(e)) {
+        bridgeLogger.warn(
+          `[Feishu] ⚠️ edit content too long (230025), fallback to chunked text patch msg=${messageId}`,
+        );
+        const plain = this.extractPlainTextForFallback(text);
+        const chunks = splitTextChunksByBytes(plain, FEISHU_TEXT_CHUNK_MAX_BYTES);
+        const ok = await this.patchTextMessage(messageId, chunks[0] || '');
+        if (!ok) return false;
+        if (chunks.length > 1) {
+          const fullHash = hashText(plain);
+          if (this.overflowMessageHashByMsg.get(messageId) !== fullHash) {
+            for (let i = 1; i < chunks.length; i++) {
+              await this.sendTextMessage(chatId, `（续 ${i + 1}/${chunks.length}）\n${chunks[i]}`);
+            }
+            this.overflowMessageHashByMsg.set(messageId, fullHash);
+          }
+        }
+        return true;
+      }
       if (isRateLimitError(e)) {
         this.markRateLimited(chatId, 'edit');
         bridgeLogger.warn(

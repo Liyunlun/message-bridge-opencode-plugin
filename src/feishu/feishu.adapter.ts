@@ -19,6 +19,7 @@ function clip(s: string, n = 8000) {
 }
 
 export class FeishuAdapter implements BridgeAdapter {
+  readonly provider = 'feishu';
   private client: FeishuClient;
   private renderer: FeishuRenderer;
   private config: FeishuConfig;

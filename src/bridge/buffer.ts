@@ -3,6 +3,7 @@ import type { FilePart, Part, ToolPart, ToolState } from '@opencode-ai/sdk';
 import {
   SAFE_MAX_REASONING,
   SAFE_MAX_TEXT,
+  SAFE_MAX_TOOL_ITEMS,
   SAFE_MAX_TOOL_INPUT,
   SAFE_MAX_TOOL_OUTPUT,
 } from '../constants';
@@ -110,46 +111,26 @@ export function buildDisplayContent(buffer: MessageBuffer): string {
 
   if (buffer.tools.size > 0) {
     out.push('## Tools');
+    const toolList = Array.from(buffer.tools.values());
+    const visibleTools = toolList.slice(-SAFE_MAX_TOOL_ITEMS);
+    const hiddenCount = toolList.length - visibleTools.length;
 
-    for (const t of buffer.tools.values()) {
+    if (hiddenCount > 0) {
+      out.push(`- ... ${hiddenCount} earlier tool calls omitted`);
+    }
+
+    for (const t of visibleTools) {
       const head = ['-', t.tool || 'tool', `(${t.status})`, t.title ? ` ${t.title}` : ''].join('');
       out.push(head);
 
-      // input/output/error 保持“字段块”，renderer 再决定是否折叠/裁剪/隐藏
-      if (t.input !== undefined) {
-        out.push('  input:');
-        out.push('  ```json');
-        out.push(
-          safeJsonStringify(t.input, SAFE_MAX_TOOL_INPUT)
-            .split('\n')
-            .map(l => `  ${l}`)
-            .join('\n')
-        );
-        out.push('  ```');
-      }
-
-      if (t.output) {
-        out.push('  output:');
-        out.push('  ```');
-        out.push(
-          clipTail(t.output, SAFE_MAX_TOOL_OUTPUT)
-            .split('\n')
-            .map(l => `  ${l}`)
-            .join('\n')
-        );
-        out.push('  ```');
-      }
-
-      if (t.error) {
-        out.push('  error:');
-        out.push('  ```');
-        out.push(
-          clipTail(t.error, SAFE_MAX_TOOL_OUTPUT)
-            .split('\n')
-            .map(l => `  ${l}`)
-            .join('\n')
-        );
-        out.push('  ```');
+      // For Feishu stability, do not include raw tool input/output/error payloads.
+      // Keep only lightweight execution metadata.
+      const meta: string[] = [];
+      if (t.input !== undefined) meta.push('input hidden');
+      if (t.output) meta.push('output hidden');
+      if (t.error) meta.push('error hidden');
+      if (meta.length > 0) {
+        out.push(`  ${meta.join(', ')}`);
       }
 
       // time（纯字段）
@@ -184,7 +165,9 @@ export function buildDisplayContent(buffer: MessageBuffer): string {
     out.push(modelLabel);
   }
 
-  return out.join('\n');
+  const joined = out.join('\n');
+  if (joined.length <= 12000) return joined;
+  return `${joined.slice(0, 12000)}\n\n... (response truncated)`;
 }
 
 export function applyPartToBuffer(buffer: MessageBuffer, part: Part, delta?: string) {

@@ -18,9 +18,10 @@ export const MAX_TEXT_CHARS = 16000;
 export const MAX_TOOL_OUTPUT_CHARS = 4000;
 export const MAX_TOOL_INPUT_CHARS = 2000;
 
-export const SAFE_MAX_REASONING = 8000;
-export const SAFE_MAX_TEXT = 24000;
-export const SAFE_MAX_TOOL_INPUT = 4000;
-export const SAFE_MAX_TOOL_OUTPUT = 8000;
+export const SAFE_MAX_REASONING = 1200;
+export const SAFE_MAX_TEXT = 6000;
+export const SAFE_MAX_TOOL_INPUT = 600;
+export const SAFE_MAX_TOOL_OUTPUT = 1200;
+export const SAFE_MAX_TOOL_ITEMS = 12;
 
 export const BRIDGE_FEISHU_RESPONSE_TIMEOUT_MS = 60000;

@@ -94,6 +94,11 @@ export async function flushMessage(params: {
   const content = buildDisplay(buffer);
   if (!content.trim()) return;
 
+  const provider = (adapter as { provider?: string }).provider;
+  if ((provider === 'feishu' || provider === 'lark') && !force) {
+    return;
+  }
+
   const hash = simpleHash(content);
   if (hash === buffer.lastDisplayHash) return;
 

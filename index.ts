@@ -18,8 +18,18 @@ import { parseFeishuConfig } from './index.feishu';
 import { parseTelegramConfig } from './index.telegram';
 import { parseQQConfig } from './index.qq';
 
+function isBridgeRuntimeEnabled(): boolean {
+  const raw = String(process.env.BRIDGE_ENABLED ?? 'false').toLowerCase().trim();
+  return ['1', 'true', 'on', 'yes'].includes(raw);
+}
+
 export const BridgePlugin: Plugin = async ctx => {
   const { client } = ctx;
+  if (!isBridgeRuntimeEnabled()) {
+    bridgeLogger.info('[Plugin] bridge disabled by BRIDGE_ENABLED env');
+    return {};
+  }
+
   bridgeLogger.info(
     `[Plugin] bridge entry initializing logFile=${getBridgeLogFilePath()} pid=${process.pid} instance=${runtimeInstanceId}`,
   );

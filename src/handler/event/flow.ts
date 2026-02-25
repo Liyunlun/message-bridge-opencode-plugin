@@ -11,6 +11,28 @@ import { summarizeObservedEvent, unwrapObservedEvent } from './utils';
 
 export type { EventFlowDeps } from './types';
 
+const FORWARDED_EVENT_TYPES = new Set<string>([
+  'message.updated',
+  'message.removed',
+  'message.part.updated',
+  'message.part.delta',
+  'message.part.removed',
+  'session.status',
+  'session.idle',
+  'session.error',
+  'permission.updated',
+  'permission.asked',
+  'permission.replied',
+  'question.asked',
+  'question.replied',
+  'question.rejected',
+  'command.executed',
+]);
+
+function shouldForwardEventType(type: string): boolean {
+  return FORWARDED_EVENT_TYPES.has(type);
+}
+
 export async function startGlobalEventListenerWithDeps(
   api: OpencodeClient,
   mux: AdapterMux,
@@ -40,6 +62,7 @@ export async function startGlobalEventListenerWithDeps(
           bridgeLogger.debug('[BridgeFlow] event.observed.unparsed', event);
           continue;
         }
+        if (!shouldForwardEventType(e.type)) continue;
         bridgeLogger.info('[BridgeFlow] event.observed', summarizeObservedEvent(e));
         await dispatchEventByType(e, api, mux, deps);
       }
@@ -68,6 +91,7 @@ export async function startGlobalEventListenerWithDeps(
         const e = unwrapObservedEvent(event);
         if (deps.listenerState.shouldStopListener) break;
         if (!e) continue;
+        if (!shouldForwardEventType(e.type)) continue;
         bridgeLogger.info('[BridgeFlow] global.event.observed', summarizeObservedEvent(e));
         await dispatchEventByType(e, api, mux, deps);
       }
@@ -95,6 +119,7 @@ export async function handleObservedEventWithDeps(
     bridgeLogger.debug('[BridgeFlow] event.observed.unparsed', event);
     return;
   }
+  if (!shouldForwardEventType(e.type)) return;
   bridgeLogger.info('[BridgeFlow] hook.event.observed', summarizeObservedEvent(e));
   await dispatchEventByType(e, api, mux, deps);
 }
